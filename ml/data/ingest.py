@@ -36,7 +36,7 @@ import re
 from collections import defaultdict
 from pathlib import Path
 
-from ml.config import DATA_ROOT, SCRIPTS, TRACK_B
+from ml.config import DATA_ROOT, SCRIPTS, TRACK_A, TRACK_B
 from ml.data.manifest import DEFAULT_MANIFEST_PATH, Manifest, Record
 
 __all__ = ["ingest_synthetic", "ingest_cedar", "ingest_internal"]
@@ -215,18 +215,153 @@ def reference_profile(records: list[Record]) -> dict:
     }
 
 
-INGESTORS = {"synthetic": ingest_synthetic, "cedar": ingest_cedar, "internal": ingest_internal}
+def ingest_generic(
+    root: Path,
+    manifest_root: Path = DATA_ROOT,
+    *,
+    source: str,
+    layout: str = "folder",
+    script: str = SCRIPTS.default,
+    licence_track: str = TRACK_A.name,
+    signer_depth: int = 0,
+    no_forgeries: bool = False,
+) -> list[Record]:
+    """Ingest a third-party dataset laid out as folders of images.
+
+    Handles the two layouts most public signature datasets use. Run
+    :mod:`ml.data.inspect` first to see which one applies.
+
+    Args:
+        layout: ``"folder"`` when genuine/forged is a directory name somewhere
+            in the path, ``"filename"`` when it is encoded in the file name.
+        signer_depth: which path component under ``root`` identifies the
+            signer, counting from 0. The default assumes ``<root>/<signer>/…``.
+        no_forgeries: the dataset contains only genuine samples. Everything is
+            labelled genuine and the corpus is usable for writer-identity
+            pretraining but not for measuring skilled-forgery EER.
+
+    Defaults to Track A. Third-party datasets are research-licensed far more
+    often than their upload page suggests — a permissive licence on a
+    *re-upload* does not relicense the underlying corpus. Pass
+    ``licence_track`` explicitly only after checking the original source.
+    """
+    from ml.data.inspect import classify
+
+    root = Path(root)
+    if not root.exists():
+        raise FileNotFoundError(f"{root} does not exist")
+    if script not in SCRIPTS.values:
+        raise ValueError(f"Unknown script {script!r}; expected one of {SCRIPTS.values}")
+
+    records: list[Record] = []
+    unlabelled: list[str] = []
+
+    for path in sorted(root.rglob("*")):
+        if not path.is_file() or path.suffix.lower() not in IMAGE_SUFFIXES:
+            continue
+
+        parts = path.relative_to(root).parts
+        if len(parts) <= signer_depth:
+            continue
+        signer = parts[signer_depth]
+
+        if no_forgeries:
+            label = "genuine"
+        else:
+            label = None
+            if layout == "folder":
+                # Search the path from the deepest folder outward, so a
+                # per-signer "forgeries" subfolder wins over a top-level
+                # "train" folder.
+                for part in reversed(parts[:-1]):
+                    label = classify(part)
+                    if label:
+                        break
+            else:
+                label = classify(path.name)
+
+            if label is None:
+                unlabelled.append(str(path.relative_to(root)))
+                continue
+
+        records.append(
+            Record(
+                image_path=_relative(path, manifest_root),
+                signer_id=f"{source}:{signer}",
+                label=label,  # type: ignore[arg-type]
+                script=script,
+                source=source,
+                licence_track=licence_track,
+            )
+        )
+
+    if unlabelled:
+        raise ValueError(
+            f"{len(unlabelled)} image(s) could not be classified as genuine or forged, "
+            f"e.g. {unlabelled[:3]}.\n"
+            "Refusing to guess: labelling a forgery as genuine teaches the model to "
+            "accept it, and that mistake raises validation accuracy rather than lowering "
+            "it, so nothing downstream will catch it. Run `python -m ml.data.inspect "
+            f"--root {root}` and pick the right --layout, or pass --no-forgeries if the "
+            "dataset genuinely contains only genuine samples."
+        )
+    if not records:
+        raise FileNotFoundError(f"No images found under {root}")
+    return records
+
+
+INGESTORS = {
+    "synthetic": ingest_synthetic,
+    "cedar": ingest_cedar,
+    "internal": ingest_internal,
+    "generic": ingest_generic,
+}
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest a corpus into the manifest")
-    parser.add_argument("--source", choices=sorted(INGESTORS), required=True)
+    parser.add_argument(
+        "--source",
+        required=True,
+        help=(
+            "One of " + ", ".join(sorted(INGESTORS)) + ", or any name of your own when "
+            "using --layout (the name becomes the signer-id prefix and the per-source "
+            "tag in the accuracy report)"
+        ),
+    )
     parser.add_argument("--root", type=Path, required=True, help="Corpus directory")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST_PATH)
     parser.add_argument(
         "--replace",
         action="store_true",
         help="Drop existing records from this source before adding (default: append)",
+    )
+    parser.add_argument(
+        "--layout",
+        choices=["folder", "filename"],
+        help="Use the generic ingester: is genuine/forged encoded in folder or file names?",
+    )
+    parser.add_argument("--script", default=SCRIPTS.default, choices=list(SCRIPTS.values))
+    parser.add_argument(
+        "--track",
+        choices=["a", "b"],
+        default="a",
+        help=(
+            "Licence track. Defaults to 'a' (research only). Only pass 'b' after "
+            "confirming the ORIGINAL dataset permits commercial use - a permissive "
+            "licence on a re-upload does not relicense the underlying corpus."
+        ),
+    )
+    parser.add_argument(
+        "--signer-depth",
+        type=int,
+        default=0,
+        help="Which path component under --root names the signer (0 = <root>/<signer>/...)",
+    )
+    parser.add_argument(
+        "--no-forgeries",
+        action="store_true",
+        help="Dataset holds only genuine samples; usable for writer-identity pretraining",
     )
     args = parser.parse_args()
 
@@ -236,7 +371,25 @@ def main() -> None:
     if args.replace:
         manifest.records = [r for r in manifest.records if r.source != args.source]
 
-    new_records = INGESTORS[args.source](args.root, manifest.root)
+    if args.layout:
+        new_records = ingest_generic(
+            args.root,
+            manifest.root,
+            source=args.source,
+            layout=args.layout,
+            script=args.script,
+            licence_track=TRACK_B.name if args.track == "b" else TRACK_A.name,
+            signer_depth=args.signer_depth,
+            no_forgeries=args.no_forgeries,
+        )
+    elif args.source in INGESTORS:
+        new_records = INGESTORS[args.source](args.root, manifest.root)
+    else:
+        raise SystemExit(
+            f"Unknown source {args.source!r} and no --layout given. Either use a built-in "
+            f"source ({', '.join(sorted(INGESTORS))}) or pass --layout to use the generic "
+            "ingester. Run `python -m ml.data.inspect --root <dir>` first."
+        )
     existing = {r.image_path for r in manifest.records}
     added = [r for r in new_records if r.image_path not in existing]
     manifest.extend(added)
