@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Node
+node_modules/
+web/dist/
+*.tsbuildinfo
+
+# Data & models — NEVER commit. Signature images are biometric PII.
+# `data/*` rather than `data/`: git does not descend into an excluded
+# directory, so a `!data/.gitkeep` negation under `data/` would never apply and
+# the placeholder would be silently dropped from the repository.
+data/*
+!data/.gitkeep
+artifacts/*
+!artifacts/.gitkeep
+*.pt
+*.pth
+*.onnx
+*.ckpt
+
+# Generated reports — they embed corpus specifics and are rebuilt by the harness
+docs/accuracy-report*.md
+docs/accuracy-report*.json
+docs/vendor-comparison*.md
+docs/writer-count-ablation*.md
+docs/writer-count-ablation*.json
+docs/*.png
+
+# Local env
+.env
+.env.local
+*.log
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

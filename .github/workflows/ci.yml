@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          pip install -r requirements.txt
+
+      - name: Lint
+        run: ruff check ml api
+
+      - name: Tests
+        # API end-to-end tests skip themselves when no checkpoint is present,
+        # which is the normal case in CI. `not slow` skips the backbone tests,
+        # which would download hundreds of megabytes of pretrained weights.
+        run: pytest -q -m "not slow"
+
+      - name: Guard the split and licence invariants
+        # These also run as part of pytest; called out separately so a failure
+        # is obvious in the job summary rather than buried in test output.
+        run: pytest tests/test_repo_invariants.py -v
+
+      - name: Guard scale invariance
+        # The preprocessing contract that stops a genuine signature written
+        # slightly smaller than the stored specimen from scoring as a forgery.
+        run: pytest ml/tests/test_scale_invariance.py -v
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci || npm install
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build

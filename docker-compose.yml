@@ -1,0 +1,73 @@
+# On-premise stack. No service reaches the public internet at runtime.
+# Bring up with: docker compose up
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-sigver}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-in-prod}
+      POSTGRES_DB: ${POSTGRES_DB:-sigver}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sigver}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Object storage for signature images. S3-compatible so the organisation can swap in
+  # its own on-prem object store without code changes.
+  storage:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-sigver}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-change-me-in-prod}
+    volumes:
+      - storage_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment:
+      SV_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-sigver}:${POSTGRES_PASSWORD:-change-me-in-prod}@db:5432/${POSTGRES_DB:-sigver}
+      SV_STORAGE_ENDPOINT: http://storage:9000
+      SV_STORAGE_ACCESS_KEY: ${MINIO_USER:-sigver}
+      SV_STORAGE_SECRET_KEY: ${MINIO_PASSWORD:-change-me-in-prod}
+      SV_ARTIFACT_ROOT: /app/artifacts
+      SV_JWT_SECRET: ${SV_JWT_SECRET:-change-me-in-prod}
+    volumes:
+      - ./artifacts:/app/artifacts:ro
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+
+  web:
+    build:
+      # Root context so the Dockerfile can reach both web/ and docker/nginx.conf.
+      context: .
+      dockerfile: docker/web.Dockerfile
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+volumes:
+  db_data:
+  storage_data:

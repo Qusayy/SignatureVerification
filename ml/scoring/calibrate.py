@@ -1,0 +1,194 @@
+"""Turning a normalised score into a number an employee can act on.
+
+An S-normalised score is a z-score: statistically meaningful, and useless on a
+operator screen. "2.4 standard deviations above the impostor mean" is not
+something to ask a operator to reason about under time pressure.
+
+Calibration maps that z-score to a probability that the signature is genuine,
+fitted with isotonic regression on held-out data. Isotonic is used rather than
+a sigmoid (Platt scaling) because it makes no assumption about the shape of the
+score distribution, only that higher scores are never less likely to be
+genuine — which is exactly the guarantee needed and nothing more.
+
+The fitted curve is stored as plain breakpoints rather than a pickled
+scikit-learn object. A pickle ties the production service to the exact library
+version that produced it, and an organisation's deployment lifecycle outlives any given
+scikit-learn release.
+
+**The output is a probability, not a decision.** Bands are advisory guidance
+for the employee, who always makes the final call.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from enum import StrEnum
+from pathlib import Path
+
+import numpy as np
+
+from ml.config import SCORING, ScoringConfig
+
+__all__ = ["Band", "ScoreCalibrator", "band_for"]
+
+
+class Band(StrEnum):
+    """Advisory guidance shown alongside the score. Never a decision."""
+
+    GREEN = "green"  # consistent with the stored specimens
+    AMBER = "amber"  # inconclusive — inspect carefully
+    RED = "red"  # inconsistent with the stored specimens
+
+    @property
+    def guidance(self) -> str:
+        return {
+            Band.GREEN: "Consistent with the stored specimen(s).",
+            Band.AMBER: "Inconclusive. Compare manually before deciding.",
+            Band.RED: "Not consistent with the stored specimen(s).",
+        }[self]
+
+
+def band_for(score_0_100: float, cfg: ScoringConfig = SCORING) -> Band:
+    if score_0_100 >= cfg.green_min:
+        return Band.GREEN
+    if score_0_100 <= cfg.red_max:
+        return Band.RED
+    return Band.AMBER
+
+
+@dataclass
+class ScoreCalibrator:
+    """Monotone piecewise-linear map from normalised score to P(genuine).
+
+    Built by :meth:`fit` from isotonic regression, then evaluated with plain
+    interpolation so inference carries no scikit-learn dependency.
+    """
+
+    x: np.ndarray  # ascending normalised scores
+    y: np.ndarray  # non-decreasing probabilities in [0, 1]
+    n_fit_genuine: int = 0
+    n_fit_impostor: int = 0
+    fitted_on: str = ""
+
+    # -- fitting ----------------------------------------------------------
+
+    @classmethod
+    def fit(
+        cls,
+        genuine_scores: np.ndarray | list[float],
+        impostor_scores: np.ndarray | list[float],
+        *,
+        fitted_on: str = "",
+        clip: tuple[float, float] = (0.005, 0.995),
+    ) -> ScoreCalibrator:
+        """Fit the calibration curve on held-out comparison scores.
+
+        Fit this on the **validation** split, never on the sealed test set: a
+        calibrator fitted on test data reports a confidence that is
+        indistinguishable from having peeked.
+
+        Args:
+            clip: probabilities are clipped away from exactly 0 and 1. A
+                verification system that reports absolute certainty is
+                misleading regardless of how clean the score was.
+        """
+        from sklearn.isotonic import IsotonicRegression
+
+        g = np.asarray(genuine_scores, dtype=float).ravel()
+        i = np.asarray(impostor_scores, dtype=float).ravel()
+        if len(g) < 10 or len(i) < 10:
+            raise ValueError(
+                f"Too few scores to calibrate ({len(g)} genuine, {len(i)} impostor); "
+                "need at least 10 of each and realistically hundreds."
+            )
+
+        scores = np.concatenate([g, i])
+        labels = np.concatenate([np.ones(len(g)), np.zeros(len(i))])
+        order = np.argsort(scores)
+
+        iso = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        probabilities = iso.fit_transform(scores[order], labels[order])
+
+        # Collapse to the breakpoints where the isotonic step function changes,
+        # keeping the curve compact and exactly reproducible.
+        xs, ys = scores[order], probabilities
+        keep = np.ones(len(xs), dtype=bool)
+        keep[1:-1] = (np.diff(ys)[:-1] != 0) | (np.diff(ys)[1:] != 0)
+        xs, ys = xs[keep], ys[keep]
+
+        # Deduplicate equal x values, which np.interp cannot handle.
+        unique_x, index = np.unique(xs, return_index=True)
+        unique_y = np.maximum.accumulate(ys[index])
+
+        return cls(
+            x=unique_x,
+            y=np.clip(unique_y, *clip),
+            n_fit_genuine=len(g),
+            n_fit_impostor=len(i),
+            fitted_on=fitted_on,
+        )
+
+    # -- application ------------------------------------------------------
+
+    def probability(self, score: float | np.ndarray) -> float | np.ndarray:
+        """Map a normalised score to P(genuine)."""
+        result = np.interp(np.asarray(score, dtype=float), self.x, self.y)
+        return float(result) if np.isscalar(score) or result.ndim == 0 else result
+
+    def score_0_100(self, score: float) -> float:
+        """Map a normalised score to the 0-100 confidence shown to employees."""
+        return round(float(self.probability(score)) * 100.0, 1)
+
+    def band(self, score: float, cfg: ScoringConfig = SCORING) -> Band:
+        return band_for(self.score_0_100(score), cfg)
+
+    def threshold_for_probability(self, probability: float) -> float:
+        """Invert the curve: the normalised score achieving a given P(genuine)."""
+        return float(np.interp(probability, self.y, self.x))
+
+    # -- persistence ------------------------------------------------------
+
+    def save(self, path: Path | str) -> Path:
+        path = Path(path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "x": self.x.tolist(),
+                    "y": self.y.tolist(),
+                    "n_fit_genuine": self.n_fit_genuine,
+                    "n_fit_impostor": self.n_fit_impostor,
+                    "fitted_on": self.fitted_on,
+                },
+                indent=2,
+            )
+        )
+        return path
+
+    @classmethod
+    def load(cls, path: Path | str) -> ScoreCalibrator:
+        payload = json.loads(Path(path).read_text())
+        return cls(
+            x=np.asarray(payload["x"], dtype=float),
+            y=np.asarray(payload["y"], dtype=float),
+            n_fit_genuine=payload.get("n_fit_genuine", 0),
+            n_fit_impostor=payload.get("n_fit_impostor", 0),
+            fitted_on=payload.get("fitted_on", ""),
+        )
+
+    @classmethod
+    def identity(cls) -> ScoreCalibrator:
+        """An uncalibrated fallback mapping z-scores in [-2, 6] onto [0, 1].
+
+        Used only so the stack runs before a calibrator has been fitted. Any
+        score produced through this path must be labelled uncalibrated in the
+        UI — it is a placeholder, not a confidence.
+        """
+        x = np.linspace(-2.0, 6.0, 33)
+        y = np.clip((x + 2.0) / 8.0, 0.005, 0.995)
+        return cls(x=x, y=y, fitted_on="identity-placeholder")
+
+    @property
+    def is_placeholder(self) -> bool:
+        return self.fitted_on == "identity-placeholder"

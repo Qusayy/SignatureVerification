@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "signature-verification"
+version = "0.1.0"
+description = "Self-hosted offline handwritten signature verification (advisory mode)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+dynamic = ["dependencies"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }
+
+[tool.setuptools.packages.find]
+include = ["ml*", "api*"]
+
+[tool.pytest.ini_options]
+testpaths = ["ml/tests", "api/tests", "tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "slow: downloads pretrained weights from the Hugging Face hub; deselect with -m 'not slow' on an air-gapped machine",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# B008 flags function calls in argument defaults. That is exactly how FastAPI
+# declares dependencies (`x = Depends(...)`, `f = File(...)`), so the rule is a
+# false positive across the whole API layer.
+"api/**" = ["B008"]
