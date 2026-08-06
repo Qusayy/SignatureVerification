@@ -132,10 +132,46 @@ class Manifest:
                 out[r.signer_id].append(r)
         return dict(out)
 
+    def usability(self) -> dict:
+        """How many signers can actually contribute to training and evaluation.
+
+        Counting records overstates a corpus. A signer with a single genuine
+        sample forms no positive pair and is skipped by the batch sampler
+        without comment; a signer with no forgeries contributes nothing to the
+        skilled-forgery metric that decides whether the system works. Both are
+        common in public datasets, and both are invisible in a record count.
+        """
+        by_signer: dict[str, Counter] = defaultdict(Counter)
+        for record in self.records:
+            by_signer[record.signer_id][record.label] += 1
+
+        total = len(by_signer)
+        trainable = sum(1 for c in by_signer.values() if c["genuine"] >= 2)
+        with_forgeries = sum(
+            1 for c in by_signer.values() if c["genuine"] >= 1 and c["skilled_forgery"] >= 1
+        )
+        evaluable = sum(
+            1 for c in by_signer.values() if c["genuine"] >= 2 and c["skilled_forgery"] >= 1
+        )
+        genuine_counts = sorted(c["genuine"] for c in by_signer.values())
+
+        return {
+            "signers_total": total,
+            "signers_trainable": trainable,
+            "signers_dropped_single_genuine": total - trainable,
+            "signers_with_forgeries": with_forgeries,
+            "signers_evaluable": evaluable,
+            "median_genuine_per_signer": (
+                genuine_counts[len(genuine_counts) // 2] if genuine_counts else 0
+            ),
+            "min_genuine_per_signer": genuine_counts[0] if genuine_counts else 0,
+        }
+
     def stats(self) -> dict:
         return {
             "records": len(self.records),
             "signers": len(self.signers()),
+            "usability": self.usability(),
             "by_label": dict(Counter(r.label for r in self.records)),
             "by_script": dict(Counter(r.script for r in self.records)),
             "by_source": dict(Counter(r.source for r in self.records)),
@@ -282,7 +318,25 @@ def _cmd_verify(args: argparse.Namespace) -> None:
 
 
 def _cmd_stats(args: argparse.Namespace) -> None:
-    print(json.dumps(Manifest.load(args.manifest).stats(), indent=2))
+    manifest = Manifest.load(args.manifest)
+    stats = manifest.stats()
+    print(json.dumps(stats, indent=2))
+
+    usable = stats["usability"]
+    if usable["signers_dropped_single_genuine"]:
+        print(
+            f"\nWARNING: {usable['signers_dropped_single_genuine']} of "
+            f"{usable['signers_total']} signers have fewer than 2 genuine samples. "
+            "They form no positive pair and will be skipped silently during training — "
+            f"the effective corpus is {usable['signers_trainable']} writers, not "
+            f"{usable['signers_total']}."
+        )
+    if usable["signers_evaluable"] < usable["signers_total"]:
+        print(
+            f"\nNOTE: only {usable['signers_evaluable']} signer(s) have both 2+ genuine "
+            "samples and at least one forgery, so only those contribute to the "
+            "skilled-forgery EER — the metric that decides whether this works."
+        )
 
 
 def main() -> None:
