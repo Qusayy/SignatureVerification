@@ -77,6 +77,11 @@ class DetectionOut(BaseModel):
 
 
 class ComparisonOut(BaseModel):
+    # NOTE: `raw` is not a similarity. When writer normalisation applies it is
+    # the combined similarity minus `intra_reference_mean`, so it sits near
+    # zero for a genuine signature and goes negative for one less consistent
+    # than the customer's own specimens. The similarities are reported
+    # alongside it precisely because the two are easy to confuse.
     raw: float
     max_similarity: float
     mean_similarity: float
@@ -84,6 +89,10 @@ class ComparisonOut(BaseModel):
     per_reference: list[float]
     n_references: int
     single_reference: bool
+    # The baseline `raw` is measured against. Without it a client cannot
+    # explain why an 89% match scored 50, and the panel reads as broken.
+    intra_reference_mean: float = 0.0
+    writer_normalised: bool = False
 
 
 class PipelineStageOut(BaseModel):

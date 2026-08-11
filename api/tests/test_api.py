@@ -523,3 +523,49 @@ def test_scoring_stages_carry_the_numbers_behind_the_result(client, auth, signat
     # The displayed score must be the score, not a separately rounded one.
     assert calibration["metrics"]["score"] == round(body["score"], 1)
     assert calibration["metrics"]["band"] == body["band"]
+
+
+def test_comparison_reports_the_baseline_the_score_is_measured_against(
+    client, auth, signatures
+):
+    """A client cannot explain the score without it.
+
+    `raw` is the combined similarity minus the customer's own specimen
+    agreement, so an 89% match against specimens that agree at 88.5% scores
+    near the middle of the range. Reporting only the similarities makes that
+    look like a defect.
+    """
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:3])
+
+    body = client.post(
+        "/api/verify",
+        headers=auth,
+        data={"customer_number": "C001", "is_full_page": "false"},
+        files={"file": as_upload(signatures["genuine"][3])},
+    ).json()
+
+    comparison = body["comparison"]
+    assert comparison["writer_normalised"] is True
+    assert 0.0 < comparison["intra_reference_mean"] <= 1.0
+    # raw is the margin, not the similarity — the arithmetic must reconcile.
+    combined = 0.5 * comparison["max_similarity"] + 0.5 * comparison["mean_similarity"]
+    assert comparison["raw"] == pytest.approx(
+        combined - comparison["intra_reference_mean"], abs=1e-4
+    )
+
+
+def test_single_specimen_reports_no_baseline(client, auth, signatures):
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
+
+    body = client.post(
+        "/api/verify",
+        headers=auth,
+        data={"customer_number": "C001", "is_full_page": "false"},
+        files={"file": as_upload(signatures["genuine"][3])},
+    ).json()
+
+    assert body["comparison"]["writer_normalised"] is False
+    assert body["comparison"]["intra_reference_mean"] == 0.0
+    assert "score_not_writer_normalised" in body["warnings"]

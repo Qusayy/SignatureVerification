@@ -14,6 +14,12 @@ export interface Employee {
 }
 
 export interface Comparison {
+  /**
+   * The score the decision is made on. Note this is NOT the similarity: when
+   * writer normalisation applies it is the similarity minus
+   * `intra_reference_mean`, so it sits near zero for a genuine signature and
+   * goes negative for one less consistent than the customer's own specimens.
+   */
   raw: number
   max_similarity: number
   mean_similarity: number
@@ -21,6 +27,9 @@ export interface Comparison {
   per_reference: number[]
   n_references: number
   single_reference: boolean
+  /** Mean pairwise similarity among the customer's own specimens. */
+  intra_reference_mean: number
+  writer_normalised: boolean
 }
 
 export interface Detection {

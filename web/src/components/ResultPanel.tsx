@@ -15,13 +15,31 @@ const WARNING_TEXT: Record<string, string> = {
     'Only one specimen signature is on file for this customer, so confidence is lower than usual.',
   uncalibrated_score_placeholder:
     'This model has not been calibrated. The number shown is indicative only, not a confidence.',
-  no_cohort_normalisation:
-    'Cohort normalisation is unavailable, so this score is not comparable across customers.',
+  score_not_writer_normalised:
+    'Only one specimen is on file, so there is no way to measure how consistently this ' +
+    'customer signs. This score is less comparable with other customers than usual.',
+  ink_outside_detected_region:
+    'Some handwriting fell outside the detected region. Check the located area, and draw ' +
+    'the box manually if part of the signature was cut off.',
   suspected_photocopy_of_stored_specimen:
     'This looks like a copy of the stored specimen rather than a freshly written signature.',
   very_dark_crop_possible_background_leak:
     'The captured area is unusually dark — background may have been picked up as ink.',
   blank_or_near_blank: 'Very little ink was found in the captured area.',
+}
+
+/**
+ * Put the margin in words.
+ *
+ * The score is driven by the gap between how well the query matches the
+ * specimens and how well the specimens match each other — not by the raw
+ * similarity, which is what an operator's eye goes to first.
+ */
+function describeMargin(margin: number): string {
+  if (margin >= 0.02) return 'Comfortably within this customer’s normal variation.'
+  if (margin >= 0) return 'About as consistent as this customer’s own specimens are.'
+  if (margin >= -0.02) return 'Slightly outside this customer’s normal variation — worth a look.'
+  return 'Noticeably less consistent than this customer’s own specimens.'
 }
 
 export function ResultPanel({ result, onDecision, submitting, decided }: Props) {
@@ -64,11 +82,40 @@ export function ResultPanel({ result, onDecision, submitting, decided }: Props) 
               <dt>Average across specimens</dt>
               <dd>{(result.comparison.mean_similarity * 100).toFixed(1)}%</dd>
             </div>
+            {result.comparison.writer_normalised && (
+              <div>
+                <dt>Specimens agree with each other</dt>
+                <dd>{(result.comparison.intra_reference_mean * 100).toFixed(1)}%</dd>
+              </div>
+            )}
             <div>
               <dt>Time</dt>
               <dd>{(result.latency_ms / 1000).toFixed(1)}s</dd>
             </div>
           </dl>
+
+          {/*
+            Without the third figure the first two do not explain the score,
+            and the panel reads as broken: 89% against the specimens looks like
+            a match until you know the customer's own specimens agree at 88.5%.
+            The comparison is the point, so state it in words rather than
+            leaving the operator to subtract.
+          */}
+          {result.comparison.writer_normalised && (
+            <p className="result__reason">
+              This signature matches{' '}
+              <strong>
+                {(result.comparison.mean_similarity * 100).toFixed(1)}%
+              </strong>{' '}
+              on average, against stored specimens that match each other{' '}
+              <strong>
+                {(result.comparison.intra_reference_mean * 100).toFixed(1)}%
+              </strong>
+              . {describeMargin(
+                result.comparison.mean_similarity - result.comparison.intra_reference_mean,
+              )}
+            </p>
+          )}
         </div>
       </div>
 

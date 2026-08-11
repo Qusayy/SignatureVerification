@@ -23,6 +23,8 @@ function result(overrides: Partial<VerificationResult> = {}): VerificationResult
       per_reference: [0.86, 0.75, 0.7],
       n_references: 3,
       single_reference: false,
+      intra_reference_mean: 0.72,
+      writer_normalised: true,
     },
     detection: {
       bbox: { x: 10, y: 20, width: 300, height: 90 },
@@ -103,5 +105,56 @@ describe('ScoreGauge', () => {
     render(<ScoreGauge score={88} band="green" calibrated />)
     expect(screen.getByText('88')).toBeInTheDocument()
     expect(screen.getByText('out of 100')).toBeInTheDocument()
+  })
+})
+
+describe('specimen agreement', () => {
+  it('shows the baseline the score is measured against', () => {
+    // Without it the panel reads as broken: a high similarity next to a
+    // middling score, with nothing on screen explaining the gap.
+    render(<ResultPanel result={result()} onDecision={vi.fn()} submitting={false} decided={null} />)
+
+    expect(screen.getByText('Specimens agree with each other')).toBeInTheDocument()
+    // Once in the figures, once in the sentence that explains the margin.
+    expect(screen.getAllByText('72.0%')).toHaveLength(2)
+    expect(screen.getByText(/Comfortably within/)).toBeInTheDocument()
+  })
+
+  it('reads the margin out in words', () => {
+    render(
+      <ResultPanel
+        result={result({
+          comparison: {
+            ...result().comparison,
+            mean_similarity: 0.71,
+            intra_reference_mean: 0.72,
+          },
+        })}
+        onDecision={vi.fn()}
+        submitting={false}
+        decided={null}
+      />,
+    )
+    expect(screen.getByText(/Slightly outside/)).toBeInTheDocument()
+  })
+
+  it('omits the comparison when there is only one specimen', () => {
+    render(
+      <ResultPanel
+        result={result({
+          comparison: {
+            ...result().comparison,
+            n_references: 1,
+            single_reference: true,
+            writer_normalised: false,
+            intra_reference_mean: 0,
+          },
+        })}
+        onDecision={vi.fn()}
+        submitting={false}
+        decided={null}
+      />,
+    )
+    expect(screen.queryByText('Specimens agree with each other')).not.toBeInTheDocument()
   })
 })
