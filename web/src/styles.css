@@ -1,18 +1,52 @@
+/* Design tokens.
+ *
+ * The pipeline replay was built dark because it is a viewing surface, and the
+ * rest of the interface was light — two visual languages in one screen. These
+ * tokens are the single source for both stylesheets, so the two cannot drift
+ * apart again. theatre.css consumes the same names.
+ *
+ * The overlay swatch colours are not a design choice. They must match the
+ * pixels the server draws in `ml/scoring/explain.py`; if they are changed
+ * here, the legend stops describing the image beside it.
+ */
+
 :root {
-  --bg: #f6f7f9;
-  --panel: #ffffff;
-  --ink: #1c2430;
-  --muted: #5d6b7a;
-  --line: #dfe4ea;
-  --brand: #1b4f8f;
-  --green: #1e7f4c;
-  --amber: #a86a06;
-  --red: #b32a2a;
+  /* Surfaces, darkest to lightest */
+  --bg: #0a0e14;
+  --bg-raise: #0c1117;
+  --panel: #10151c;
+  --panel-raise: #161d26;
+  --panel-inset: #182029;
+
+  /* Lines */
+  --line: #232f3d;
+  --line-soft: #1e2833;
+  --line-strong: #35404e;
+
+  /* Text */
+  --ink: #e7edf5;
+  --muted: #93a3b6;
+  --dim: #7e8ea3;
+
+  /* Accents */
+  --accent: #ffb340;
+  --accent-warm: #ff8a3d;
+  --brand: #4d8fd6;
+  --green: #4ade80;
+  --amber: #ffb340;
+  --red: #f87171;
+
+  /* Overlay legend — must match ml/scoring/explain.py */
   --query: #0078c8;
   --reference: #eb8c00;
-  --radius: 10px;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  color-scheme: light;
+  --agreement: #808080;
+
+  --radius: 12px;
+  --radius-sm: 8px;
+  --shadow: 0 10px 34px rgba(4, 8, 14, 0.45);
+
+  font-family: "Segoe UI", Inter, system-ui, -apple-system, sans-serif;
+  color-scheme: dark;
 }
 
 * {
@@ -21,13 +55,21 @@
 
 body {
   margin: 0;
-  background: var(--bg);
   color: var(--ink);
+  background:
+    radial-gradient(80rem 40rem at 50% -10rem, #16202c 0%, transparent 60%),
+    var(--bg);
+  background-attachment: fixed;
+  -webkit-font-smoothing: antialiased;
 }
 
 button {
   font: inherit;
   cursor: pointer;
+}
+
+::selection {
+  background: rgba(255, 179, 64, 0.28);
 }
 
 /* ---------- layout ---------- */
@@ -42,64 +84,93 @@ button {
   display: flex;
   align-items: center;
   gap: 1.5rem;
-  padding: 0.75rem 1.25rem;
-  background: var(--brand);
-  color: #fff;
+  padding: 0.7rem 1.25rem;
+  background: rgba(10, 14, 20, 0.85);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
 
 .topbar__brand {
   font-weight: 600;
   letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+}
+
+/* A small mark, so the bar is not a bare row of text. */
+.topbar__brand::before {
+  content: "";
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-warm));
+  box-shadow: 0 0 0 4px rgba(255, 179, 64, 0.14);
 }
 
 .topbar__nav {
   display: flex;
-  gap: 0.25rem;
+  gap: 0.2rem;
   margin-right: auto;
 }
 
 .topbar__nav button {
   background: transparent;
   border: 0;
-  color: #cfe0f3;
-  padding: 0.45rem 0.85rem;
-  border-radius: var(--radius);
+  color: var(--muted);
+  padding: 0.45rem 0.9rem;
+  border-radius: var(--radius-sm);
+  transition:
+    color 160ms ease,
+    background 160ms ease;
 }
 
-.topbar__nav button.active,
 .topbar__nav button:hover {
-  background: rgba(255, 255, 255, 0.16);
-  color: #fff;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
+}
+
+.topbar__nav button.active {
+  background: rgba(255, 179, 64, 0.12);
+  color: var(--accent);
 }
 
 .topbar__user {
   display: flex;
   align-items: center;
-  gap: 0.75rem;
-  font-size: 0.9rem;
+  gap: 0.85rem;
+  font-size: 0.88rem;
+  color: var(--muted);
 }
 
 .link {
   background: none;
   border: 0;
-  color: #cfe0f3;
+  color: var(--muted);
   text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.link:hover {
+  color: var(--ink);
 }
 
 main {
   flex: 1;
-  padding: 1.25rem;
-  max-width: 1100px;
+  padding: 1.5rem 1.25rem 3rem;
+  max-width: 1120px;
   width: 100%;
   margin: 0 auto;
 }
 
 .footer {
-  padding: 0.85rem 1.25rem;
-  font-size: 0.82rem;
-  color: var(--muted);
+  padding: 1rem 1.25rem;
+  font-size: 0.8rem;
+  color: var(--dim);
   border-top: 1px solid var(--line);
-  background: #fff;
   text-align: center;
 }
 
@@ -115,96 +186,195 @@ main {
   background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 1.1rem 1.25rem;
+  padding: 1.25rem 1.35rem;
   margin-bottom: 1.1rem;
+  box-shadow: var(--shadow);
 }
 
 .panel h2,
 .result h2 {
-  margin: 0 0 0.75rem;
-  font-size: 1.05rem;
+  margin: 0 0 1rem;
+  font-size: 1.02rem;
+  letter-spacing: 0.01em;
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+/* Accent rule before each panel heading, echoing the chapter dots in the
+   replay so the two surfaces read as one interface. */
+.panel h2::before,
+.result h2::before {
+  content: "";
+  width: 3px;
+  height: 1.05em;
+  border-radius: 999px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-warm));
 }
 
 .input,
 textarea {
   width: 100%;
-  padding: 0.6rem 0.7rem;
+  padding: 0.65rem 0.8rem;
+  background: var(--bg-raise);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
   font: inherit;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.input::placeholder,
+textarea::placeholder {
+  color: var(--dim);
+}
+
+.input:focus,
+textarea:focus,
+.login input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px rgba(255, 179, 64, 0.16);
+}
+
+input[type="file"] {
+  width: 100%;
+  padding: 0.9rem;
+  background: var(--bg-raise);
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  color: var(--muted);
+  font: inherit;
+  transition: border-color 160ms ease;
+}
+
+input[type="file"]:hover {
+  border-color: var(--accent);
+}
+
+input[type="file"]::file-selector-button {
+  font: inherit;
+  margin-right: 0.9rem;
+  padding: 0.4rem 0.9rem;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: var(--panel-inset);
+  color: var(--ink);
+  cursor: pointer;
 }
 
 .checkbox {
   display: flex;
   align-items: center;
-  gap: 0.5rem;
-  margin: 0.7rem 0;
+  gap: 0.55rem;
+  margin: 0.85rem 0;
   font-size: 0.9rem;
   color: var(--muted);
+  cursor: pointer;
+}
+
+.checkbox input {
+  accent-color: var(--accent);
+  width: 1rem;
+  height: 1rem;
 }
 
 /* ---------- buttons ---------- */
 
 .btn {
   border: 1px solid transparent;
-  border-radius: var(--radius);
-  padding: 0.6rem 1.1rem;
+  border-radius: var(--radius-sm);
+  padding: 0.65rem 1.2rem;
   font-weight: 600;
+  color: #0a0e14;
+  transition:
+    transform 140ms ease,
+    filter 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.btn:hover:not(:disabled) {
+  transform: translateY(-1px);
+  filter: brightness(1.06);
+}
+
+.btn:active:not(:disabled) {
+  transform: translateY(0);
 }
 
 .btn:disabled {
-  opacity: 0.5;
+  opacity: 0.4;
   cursor: not-allowed;
 }
 
 .btn--primary {
-  background: var(--brand);
-  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-warm));
+  box-shadow: 0 4px 16px rgba(255, 138, 61, 0.22);
 }
 
 .btn--accept {
   background: var(--green);
-  color: #fff;
 }
 
 .btn--reject {
   background: var(--red);
-  color: #fff;
+}
+
+.btn--ghost {
+  background: transparent;
+  border: 1px solid var(--line-strong);
+  color: var(--muted);
+}
+
+.btn--ghost:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  color: var(--ink);
+  filter: none;
 }
 
 /* ---------- customer search ---------- */
 
 .matches {
   list-style: none;
-  margin: 0.4rem 0 0;
+  margin: 0.5rem 0 0;
   padding: 0;
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   overflow: hidden;
+  background: var(--bg-raise);
 }
 
 .matches button {
   width: 100%;
   text-align: left;
-  background: #fff;
+  background: transparent;
   border: 0;
-  border-bottom: 1px solid var(--line);
-  padding: 0.6rem 0.75rem;
+  border-bottom: 1px solid var(--line-soft);
+  padding: 0.7rem 0.85rem;
+  color: var(--ink);
+  transition: background 140ms ease;
+}
+
+.matches li:last-child button {
+  border-bottom: 0;
 }
 
 .matches button:hover {
-  background: #eef3f9;
+  background: rgba(255, 179, 64, 0.08);
 }
 
 .matches__meta {
   display: block;
-  font-size: 0.8rem;
-  color: var(--muted);
+  font-size: 0.78rem;
+  color: var(--dim);
+  margin-top: 0.15rem;
 }
 
 .customer {
-  margin-top: 0.9rem;
-  padding-top: 0.9rem;
+  margin-top: 1rem;
+  padding-top: 1rem;
   border-top: 1px solid var(--line);
 }
 
@@ -212,24 +382,26 @@ textarea {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  margin-bottom: 0.6rem;
+  margin-bottom: 0.75rem;
 }
 
 .customer__tag {
-  font-size: 0.75rem;
-  background: #eef3f9;
+  font-size: 0.7rem;
+  background: rgba(77, 143, 214, 0.14);
   color: var(--brand);
-  padding: 0.15rem 0.5rem;
+  padding: 0.2rem 0.6rem;
   border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
 }
 
 /* ---------- images ---------- */
 
 .references__strip {
   display: flex;
-  gap: 0.6rem;
+  gap: 0.7rem;
   overflow-x: auto;
-  padding-bottom: 0.3rem;
+  padding-bottom: 0.4rem;
 }
 
 .references__strip figure {
@@ -239,21 +411,21 @@ textarea {
 }
 
 figure {
-  margin: 0.6rem 0;
+  margin: 0.7rem 0;
 }
 
 figure img {
   max-width: 100%;
   display: block;
   border: 1px solid var(--line);
-  border-radius: 6px;
-  background: #fff;
+  border-radius: var(--radius-sm);
+  background: var(--bg-raise);
 }
 
 figcaption {
-  font-size: 0.78rem;
-  color: var(--muted);
-  margin-top: 0.25rem;
+  font-size: 0.76rem;
+  color: var(--dim);
+  margin-top: 0.35rem;
   display: flex;
   align-items: center;
   gap: 0.35rem;
@@ -267,19 +439,42 @@ figcaption {
 .image-loading,
 .image-error {
   min-height: 90px;
-  border: 1px dashed var(--line);
-  border-radius: 6px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
   display: flex;
   align-items: center;
   justify-content: center;
-  color: var(--muted);
+  color: var(--dim);
   font-size: 0.8rem;
+  text-align: center;
+  padding: 0.5rem;
+}
+
+.image-error {
+  border-color: rgba(248, 113, 113, 0.4);
+  color: var(--red);
+}
+
+/* A pulse rather than a static box, so a slow image reads as loading rather
+   than as a rendering fault. */
+.image-loading {
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.85;
+  }
 }
 
 .swatch {
   width: 11px;
   height: 11px;
-  border-radius: 2px;
+  border-radius: 3px;
   display: inline-block;
   margin-left: 0.6rem;
 }
@@ -293,34 +488,105 @@ figcaption {
 }
 
 .swatch--both {
-  background: #464646;
+  background: var(--agreement);
 }
 
 .tabs {
   display: flex;
   gap: 0.3rem;
-  margin-bottom: 0.5rem;
+  margin-bottom: 0.7rem;
 }
 
 .tabs button {
-  background: #eef1f5;
+  background: var(--panel-inset);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 0.4rem 0.8rem;
-  font-size: 0.85rem;
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.9rem;
+  font-size: 0.84rem;
+  color: var(--muted);
+  transition:
+    color 140ms ease,
+    border-color 140ms ease;
+}
+
+.tabs button:hover {
+  color: var(--ink);
 }
 
 .tabs button.active {
-  background: var(--brand);
-  border-color: var(--brand);
-  color: #fff;
+  background: rgba(255, 179, 64, 0.12);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ---------- verify page ---------- */
+
+.verify {
+  display: flex;
+  flex-direction: column;
 }
 
 /* ---------- result ---------- */
 
+.result__images {
+  margin-top: 1.4rem;
+  padding-top: 1.3rem;
+  border-top: 1px solid var(--line);
+}
+
+/* The compared images sit side by side above about a tablet, and stack below
+   it. A counter terminal is landscape; a phone used for capture is not. */
+@media (min-width: 900px) {
+  .result__images {
+    display: grid;
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
+    grid-template-areas:
+      "tabs tabs"
+      "view refs";
+    gap: 0 1.6rem;
+    align-items: start;
+  }
+
+  .result__images > .tabs {
+    grid-area: tabs;
+  }
+
+  .result__images > figure {
+    grid-area: view;
+    margin-top: 0;
+  }
+
+  .references {
+    grid-area: refs;
+  }
+}
+
+.result__images > figure img {
+  width: 100%;
+  background: var(--bg-raise);
+}
+
+.references h3 {
+  margin: 0 0 0.6rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--dim);
+  font-weight: 600;
+}
+
+/* The per-specimen percentage under each thumbnail is the number the operator
+   scans across, so it is set apart from ordinary caption text. */
+.references .references__strip figcaption {
+  justify-content: center;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--muted);
+}
+
 .result__header {
   display: flex;
-  gap: 1.5rem;
+  gap: 2rem;
   align-items: flex-start;
   flex-wrap: wrap;
 }
@@ -332,27 +598,28 @@ figcaption {
 
 .result__reason {
   color: var(--muted);
-  line-height: 1.5;
+  line-height: 1.6;
 }
 
 .result__meta {
   display: flex;
-  gap: 1.5rem;
+  gap: 2rem;
   flex-wrap: wrap;
-  margin: 0.9rem 0 0;
+  margin: 1rem 0 0;
 }
 
 .result__meta dt {
-  font-size: 0.75rem;
-  color: var(--muted);
+  font-size: 0.7rem;
+  color: var(--dim);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.09em;
 }
 
 .result__meta dd {
-  margin: 0.15rem 0 0;
+  margin: 0.25rem 0 0;
   font-size: 1.1rem;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- gauge ---------- */
@@ -368,7 +635,7 @@ figcaption {
 
 .gauge__track {
   fill: none;
-  stroke: #e8ecf1;
+  stroke: var(--line-soft);
   stroke-width: 13;
 }
 
@@ -376,7 +643,7 @@ figcaption {
   fill: none;
   stroke-width: 13;
   stroke-linecap: round;
-  transition: stroke-dashoffset 0.5s ease;
+  transition: stroke-dashoffset 0.6s cubic-bezier(0.16, 0.9, 0.3, 1);
 }
 
 .gauge--green .gauge__value {
@@ -399,12 +666,15 @@ figcaption {
 
 .gauge__caption {
   font-size: 0.75rem;
-  fill: var(--muted);
+  fill: var(--dim);
 }
 
 .gauge__band {
   font-weight: 700;
-  margin-top: 0.2rem;
+  margin-top: 0.3rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 0.8rem;
 }
 
 .gauge--green .gauge__band {
@@ -420,31 +690,41 @@ figcaption {
 }
 
 .gauge__advisory {
-  font-size: 0.72rem;
-  color: var(--muted);
+  font-size: 0.68rem;
+  color: var(--dim);
   text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-top: 0.2rem;
+  letter-spacing: 0.07em;
+  margin-top: 0.35rem;
 }
 
 /* ---------- decision ---------- */
 
 .decision {
-  margin-top: 1.2rem;
-  padding-top: 1rem;
+  margin-top: 1.4rem;
+  padding-top: 1.2rem;
   border-top: 1px solid var(--line);
+}
+
+.decision h3 {
+  margin: 0 0 0.5rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+  color: var(--dim);
+  font-weight: 600;
 }
 
 .decision__hint {
   color: var(--muted);
   font-size: 0.88rem;
   margin-top: 0;
+  line-height: 1.55;
 }
 
 .decision__buttons {
   display: flex;
   gap: 0.7rem;
-  margin-top: 0.7rem;
+  margin-top: 0.8rem;
 }
 
 .decision__done {
@@ -455,63 +735,74 @@ figcaption {
 /* ---------- alerts ---------- */
 
 .alert {
-  padding: 0.6rem 0.8rem;
-  border-radius: var(--radius);
-  font-size: 0.88rem;
+  padding: 0.7rem 0.9rem;
+  border-radius: var(--radius-sm);
+  font-size: 0.87rem;
   border: 1px solid;
+  line-height: 1.5;
 }
 
 .alert--warn {
-  background: #fff8e8;
-  border-color: #f0d9a5;
+  background: rgba(255, 179, 64, 0.09);
+  border-color: rgba(255, 179, 64, 0.32);
   color: var(--amber);
 }
 
 .alert--danger {
-  background: #fdeeee;
-  border-color: #f0bcbc;
+  background: rgba(248, 113, 113, 0.09);
+  border-color: rgba(248, 113, 113, 0.32);
   color: var(--red);
 }
 
 /* ---------- login ---------- */
 
 .login {
-  max-width: 380px;
+  max-width: 390px;
   margin: 12vh auto;
-  background: #fff;
+  background: var(--panel);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  padding: 1.75rem;
+  padding: 2rem;
   display: flex;
   flex-direction: column;
-  gap: 0.85rem;
+  gap: 0.9rem;
+  box-shadow: var(--shadow);
 }
 
 .login h1 {
   margin: 0;
-  font-size: 1.3rem;
+  font-size: 1.35rem;
 }
 
 .login__sub {
   color: var(--muted);
   font-size: 0.87rem;
   margin: 0;
+  line-height: 1.55;
 }
 
 .login label {
   display: flex;
   flex-direction: column;
-  gap: 0.3rem;
-  font-size: 0.85rem;
-  color: var(--muted);
+  gap: 0.35rem;
+  font-size: 0.8rem;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
 }
 
 .login input {
-  padding: 0.55rem 0.7rem;
+  padding: 0.65rem 0.8rem;
+  background: var(--bg-raise);
   border: 1px solid var(--line);
-  border-radius: var(--radius);
+  border-radius: var(--radius-sm);
   font: inherit;
+  letter-spacing: normal;
+  text-transform: none;
   color: var(--ink);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease;
 }
 
 /* ---------- audit ---------- */
@@ -519,35 +810,45 @@ figcaption {
 .audit {
   width: 100%;
   border-collapse: collapse;
-  font-size: 0.87rem;
+  font-size: 0.86rem;
 }
 
 .audit th,
 .audit td {
   text-align: left;
-  padding: 0.5rem 0.6rem;
-  border-bottom: 1px solid var(--line);
+  padding: 0.6rem 0.7rem;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.audit tbody tr {
+  transition: background 140ms ease;
+}
+
+.audit tbody tr:hover {
+  background: rgba(255, 255, 255, 0.03);
 }
 
 .audit th {
-  color: var(--muted);
+  color: var(--dim);
   font-weight: 600;
-  font-size: 0.78rem;
+  font-size: 0.72rem;
   text-transform: uppercase;
+  letter-spacing: 0.08em;
+  border-bottom-color: var(--line);
 }
 
 .row--disagree {
-  background: #fff8e8;
+  background: rgba(255, 179, 64, 0.07);
 }
 
 .pill {
   display: inline-block;
-  padding: 0.1rem 0.5rem;
+  padding: 0.12rem 0.55rem;
   border-radius: 999px;
-  font-size: 0.75rem;
+  font-size: 0.72rem;
   font-weight: 600;
   margin-right: 0.25rem;
-  color: #fff;
+  color: #0a0e14;
 }
 
 .pill--green {
@@ -560,4 +861,25 @@ figcaption {
 
 .pill--red {
   background: var(--red);
+}
+
+/* ---------- scrollbars ---------- */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line-strong) transparent;
+}
+
+*::-webkit-scrollbar {
+  height: 9px;
+  width: 9px;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+}
+
+*::-webkit-scrollbar-track {
+  background: transparent;
 }

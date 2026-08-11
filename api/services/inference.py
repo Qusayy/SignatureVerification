@@ -23,6 +23,7 @@ from api.settings import get_settings
 from ml.detector.heuristic import Detection, detect_signature
 from ml.preprocess.pipeline import deskew_page, estimate_page_skew, to_grayscale
 from ml.preprocess.trace import PipelineTrace, Stage
+from ml.scoring.compare import intra_reference_mean
 from ml.scoring.explain import difference_overlay, reason_text
 from ml.scoring.verifier import EnrolmentBundle, VerificationResult, Verifier
 from ml.scoring.znorm import CohortStats
@@ -112,7 +113,13 @@ class InferenceService:
             "model_loaded": self.is_ready,
             "model_version": verifier.model_version if verifier else None,
             "checkpoint": str(self.checkpoint_path) if self.checkpoint_path else None,
-            "cohort_normalisation": bool(verifier and verifier.cohort is not None),
+            # Whether it is *applied*, not merely loaded. The cohort file is
+            # still produced and still verified against the weights, but
+            # SCORING.cohort_normalise decides whether scoring uses it.
+            "cohort_normalisation": bool(
+                verifier and verifier.cohort is not None and verifier.cfg.cohort_normalise
+            ),
+            "writer_normalisation": bool(verifier and verifier.cfg.writer_normalise),
             "calibrated": bool(verifier and not verifier.calibrator.is_placeholder),
             "advisory_only": settings.advisory_only,
             "error": self.load_error,
@@ -137,6 +144,18 @@ class InferenceService:
         if verifier.cohort is None:
             return None
         return verifier.cohort.enrolment_stats(embeddings)
+
+    def enrolment_state(self, embeddings: np.ndarray) -> tuple[CohortStats | None, float]:
+        """Everything cached per customer: cohort statistics and specimen agreement.
+
+        Returned together because both are computed from the same embeddings
+        and both must be refreshed whenever the specimen set changes. The
+        cohort half is None when cohort normalisation is off — which is now the
+        default — but the specimen agreement is always available, so the
+        enrolment row is written either way. It did not used to be, and a
+        customer without one silently fell back to an unnormalised score.
+        """
+        return self.enrolment_stats(embeddings), intra_reference_mean(embeddings)
 
     # -- verification -----------------------------------------------------
 
@@ -203,10 +222,20 @@ class InferenceService:
                 "detect",
                 "Signature located",
                 "Candidate regions are scored on ink density, stroke connectivity and "
-                "aspect ratio. Printed text blocks and stamps score poorly on stroke "
-                "continuity, which is what separates them from handwriting.",
+                "aspect ratio, then detached pieces of the same signature — a separate "
+                "flourish, initials written apart, Arabic diacritics — are merged back "
+                "in. Printed text is refused: it packs far more densely into its box "
+                "than handwriting does."
+                + (
+                    f" {(1 - detection.ink_captured):.0%} of the ink on this image falls "
+                    "outside the box. On a form that is the form itself; on an image "
+                    "that is only a signature it means part of it was cut off."
+                    if detection.is_partial
+                    else ""
+                ),
                 image=_annotate_detection(deskewed, detection),
                 confidence=round(float(detection.confidence), 3),
+                ink_captured=round(float(detection.ink_captured), 3),
                 method=detection.method,
             )
         return detection.crop(deskewed), detection
@@ -260,6 +289,12 @@ class InferenceService:
             )
 
         result = verifier.verify(crop, enrolment, trace=trace)
+
+        if detection is not None and detection.is_partial:
+            # Say so on the result, not only in the replay. A score computed
+            # from part of a signature looks exactly like a score computed from
+            # all of it, and the part that was dropped is invisible by then.
+            result.warnings.append("ink_outside_detected_region")
 
         # Overlay against the *closest* specimen, not simply the first one.
         # When a customer's stored specimens differ from each other — signed

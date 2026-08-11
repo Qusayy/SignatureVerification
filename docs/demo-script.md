@@ -58,6 +58,12 @@ Point at, in this order:
    compared against all of them, not just one.
 4. **"Advisory only — you decide"** under the gauge.
 
+A genuine signature typically lands in the 70s-90s. It is *not* pinned at 99,
+and that is deliberate: a system that returns 99 for everything cannot be
+distinguishing anything. If every score you see is 99.5, stop the demo and run
+`python -m api.doctor` — that is the signature of a cohort and calibrator
+served alongside the wrong checkpoint, and it means nothing on screen is real.
+
 ## 2a. Show the working (2 min)
 
 Below the result, **How this result was reached** replays the verification one
@@ -96,16 +102,25 @@ Let the room look at the overlay before you say anything. On a forgery the blue
 and orange separate visibly — that divergence is the thing to sell, more than
 the number.
 
-Be honest here. If the model is trained on synthetic data, these two cases may
-score similarly. If so, say so plainly:
+Most forgeries land in the red band, well below the genuine. Some do not — on
+the current synthetic corpus roughly one in nine slips into green, and a similar
+share of genuine signatures is wrongly flagged red.
 
-> "Right now the model is trained on synthetic signatures, so it is not yet
-> good at this. The overlay is still useful today. The number becomes useful
-> once we train it on our own signatures — which is the next phase, and it
-> needs your help."
+**Show one of those too.** Work through two or three forgeries rather than one,
+and when a bad case appears, say so plainly:
 
-That admission buys more credibility than a rigged demo, and it sets up the ask
-in section 6.
+> "That one got through. On our current test set this model is wrong about
+> one time in five against a *skilled* forgery — someone practising your
+> signature. Against a stranger simply signing your name it is right about
+> 99% of the time. Those are very different problems and it is the first one
+> that matters here."
+
+That admission buys more credibility than a curated demo, and it sets up the
+ask in section 6. The number improves with real signatures, which is what
+section 6 is asking for.
+
+The overlay stays useful either way — it is a comparison aid, not a verdict,
+and it works even where the score is uncertain.
 
 ## 4. The decision, and the record (2 min)
 

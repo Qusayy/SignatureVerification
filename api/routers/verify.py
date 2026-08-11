@@ -63,8 +63,14 @@ def _load_enrolment(session: Session, customer: Customer, store) -> EnrolmentBun
 
     embeddings = np.asarray([r.embedding for r in customer.references], dtype=np.float64)
     stats = None
+    reference_mean = None
     if customer.enrolment:
-        stats = CohortStats(customer.enrolment.cohort_mean, customer.enrolment.cohort_std)
+        if customer.enrolment.cohort_std:
+            stats = CohortStats(customer.enrolment.cohort_mean, customer.enrolment.cohort_std)
+        # A stored 0.0 means "never computed" — an enrolment written before this
+        # was cached. Falling back to None recomputes it rather than silently
+        # scoring as though the customer's specimens agreed perfectly.
+        reference_mean = customer.enrolment.intra_reference_mean or None
 
     canvases = []
     for reference in customer.references:
@@ -81,6 +87,7 @@ def _load_enrolment(session: Session, customer: Customer, store) -> EnrolmentBun
         embeddings=embeddings,
         cohort_stats=stats,
         canvases=canvases,
+        reference_mean=reference_mean,
     )
 
 

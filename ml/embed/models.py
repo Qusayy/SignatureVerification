@@ -25,13 +25,15 @@ be noticed at procurement.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ml.config import MODEL, PREPROCESS, ModelConfig
 
-__all__ = ["SigNet", "HybridSigNet", "build_model", "embed_batch"]
+__all__ = ["SigNet", "HybridSigNet", "build_model", "load_checkpoint", "embed_batch"]
 
 
 # --------------------------------------------------------------------------
@@ -308,6 +310,48 @@ def build_model(
         f"Unknown architecture {architecture!r}; expected 'signet', 'hybrid', "
         f"or one of {sorted(BACKBONES)}"
     )
+
+
+def load_checkpoint(path: Path | str, *, device: str = "cpu") -> tuple[nn.Module, dict]:
+    """Rebuild the exact model a checkpoint holds, and return it with its payload.
+
+    Every loader used to call ``build_model(payload.get("architecture"))`` and
+    default everything else, which quietly assumed that no run had ever changed
+    the things the checkpoint records. It made three features unloadable rather
+    than merely untested: a spatial-transformer model reconstructs without its
+    transformer and fails on the state dict, a foundation-backbone model
+    reconstructs as a SigNet, and a model trained at a different crop size
+    rebuilds at the wrong geometry.
+
+    Reconstructing from the saved ``config`` block instead means a checkpoint
+    is self-describing, which is the property that makes an experiment sweep
+    possible at all.
+    """
+    import torch
+
+    from dataclasses import fields, replace
+
+    payload = torch.load(Path(path), map_location=device, weights_only=False)
+    saved = payload.get("config", {}) or {}
+
+    cfg = MODEL
+    saved_model = saved.get("model") or {}
+    if saved_model:
+        known = {f.name for f in fields(ModelConfig)}
+        cfg = replace(MODEL, **{k: v for k, v in saved_model.items() if k in known})
+
+    model = build_model(
+        payload.get("architecture", cfg.architecture),
+        cfg,
+        # Weights come from the state dict, so the ImageNet stem must not be
+        # downloaded here: it would be overwritten anyway, and on Track B it is
+        # a licence violation to fetch it at all.
+        pretrained=False,
+        track="a",
+        spatial_transformer=bool(saved.get("spatial_transformer", False)),
+    )
+    model.load_state_dict(payload["model_state"])
+    return model, payload
 
 
 @torch.no_grad()

@@ -208,3 +208,85 @@ def test_doctor_passes_a_healthy_schema(temp_db):
     assert check_schema(report) is True
     assert report.checks[-1].status == OK
     assert not report.failed
+
+
+# --------------------------------------------------------------------------
+# The bug that started this
+#
+# `cohort.npz` and `calibrator.json` had been produced by one checkpoint while
+# the service loaded another. The only symptom was that two thirds of skilled
+# forgeries scored 99.5 out of 100 — indistinguishable, on screen, from a
+# system working perfectly. Nothing detected it because `model_version` was
+# `architecture@git_commit`, every checkpoint reported `signet@unknown`, and
+# every staleness check compared two identical meaningless strings.
+# --------------------------------------------------------------------------
+
+
+def test_model_version_identifies_weights_not_the_commit():
+    """Two checkpoints from the same commit must not report the same version."""
+    from ml.embed.provenance import weights_id
+
+    import torch
+
+    from ml.embed.models import build_model
+
+    torch.manual_seed(0)
+    first = build_model("signet").state_dict()
+    torch.manual_seed(1)
+    second = build_model("signet").state_dict()
+
+    assert weights_id(first) != weights_id(second)
+    # And neither is the string that used to stand in for identity.
+    assert "unknown" not in weights_id(first)
+
+
+def test_doctor_flags_a_cohort_from_another_run(tmp_path, monkeypatch):
+    """The check `api/doctor.py`'s docstring promised and did not implement."""
+    import numpy as np
+    import torch
+
+    from api import doctor as doctor_module
+    from api.doctor import FAIL, Report, check_artifacts
+    from ml.embed.models import build_model
+    from ml.embed.provenance import weights_id
+    from ml.scoring.znorm import CohortNormalizer
+
+    state = build_model("signet").state_dict()
+    checkpoint = tmp_path / "model.pt"
+    torch.save(
+        {
+            "model_state": state,
+            "architecture": "signet",
+            "embedding_dim": 512,
+            "weights_id": weights_id(state),
+            "config": {},
+            "provenance": {},
+        },
+        checkpoint,
+    )
+
+    rng = np.random.default_rng(0)
+    vectors = rng.normal(size=(120, 512))
+    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
+    CohortNormalizer(vectors, [f"s{i}" for i in range(120)]).save(
+        tmp_path / "cohort.npz", weights_id="0000000000000000"
+    )
+
+    monkeypatch.setattr(
+        doctor_module,
+        "get_settings",
+        lambda: Settings(
+            checkpoint_path=checkpoint,
+            cohort_path=tmp_path / "cohort.npz",
+            calibrator_path=tmp_path / "absent.json",
+            dev_key_path=tmp_path / "k",
+        ),
+    )
+
+    report = Report()
+    check_artifacts(report)
+
+    failure = next(c for c in report.checks if c.status == FAIL)
+    assert "cohort" in failure.name
+    assert "0000000000000000" in failure.detail
+    assert any("benchmark" in line for line in failure.fix)

@@ -46,11 +46,9 @@ DEFAULT_SCALES: tuple[float, ...] = (0.6, 0.7, 0.8, 0.9, 1.1, 1.25, 1.4, 1.6)
 
 def load_embedder(checkpoint: Path | str):
     """Return a function mapping a list of canvases to L2-normalised vectors."""
-    from ml.embed.models import build_model
+    from ml.embed.models import load_checkpoint
 
-    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
-    model = build_model(payload.get("architecture", "signet"))
-    model.load_state_dict(payload["model_state"])
+    model, _payload = load_checkpoint(checkpoint)
     model.eval()
 
     def embed(canvases: list[np.ndarray]) -> np.ndarray:

@@ -128,17 +128,17 @@ def seed_customers(
                 )
             )
 
-        stats = service.enrolment_stats(np.vstack(embeddings))
-        if stats is not None:
-            session.add(
-                CustomerEnrolment(
-                    customer_id=customer.id,
-                    cohort_mean=stats.mean,
-                    cohort_std=stats.std,
-                    n_references=len(embeddings),
-                    model_version=service.verifier.model_version if service.verifier else "",
-                )
+        stats, reference_mean = service.enrolment_state(np.vstack(embeddings))
+        session.add(
+            CustomerEnrolment(
+                customer_id=customer.id,
+                cohort_mean=stats.mean if stats else 0.0,
+                cohort_std=stats.std if stats else 0.0,
+                intra_reference_mean=reference_mean,
+                n_references=len(embeddings),
+                model_version=service.verifier.model_version if service.verifier else "",
             )
+        )
 
         # Query images for the demonstrator: held-back genuine samples and
         # skilled forgeries of the same signer.

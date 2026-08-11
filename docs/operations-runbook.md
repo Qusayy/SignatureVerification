@@ -52,6 +52,41 @@ python -m ml.embed.provenance artifacts/signet_track_b.pt --gate
 Non-zero exit means the weight was trained on non-commercial data or from a
 licence-encumbered initialisation. Do not deploy it. See `docs/licensing.md`.
 
+### Retraining checklist
+
+Order matters, because `ml.eval.benchmark` always writes `artifacts/cohort.npz`
+and `artifacts/calibrator.json` — for whichever checkpoint it was pointed at.
+Benchmark the checkpoint you intend to **serve**, and benchmark it last.
+
+```bash
+# 1. Clear the embedding cache if the corpus or its splits changed.
+#    Entries are keyed by corpus fingerprint, so a stale one is ignored rather
+#    than misread — but it is dead weight.
+rm -rf data/cache
+
+# 2. Train.
+python -m ml.embed.train --arch signet --track b --manifest data/manifest_real.json ...
+
+# 3. Benchmark. This regenerates the cohort and calibrator, stamped with the
+#    weights that produced them, and writes the accuracy report.
+python -m ml.eval.benchmark --checkpoint artifacts/<new>.pt --split test --by-script
+
+# 4. Point the service at it (in .env, which does not travel with the repo).
+#    SV_CHECKPOINT_PATH=artifacts/<new>.pt
+
+# 5. Re-embed every stored specimen, or rebuild the demo outright.
+python -m api.reenrol --check && python -m api.reenrol --apply
+#    or, if the schema also changed:
+python -m api.seed --reset --manifest data/manifest_real.json --customers 10 --references 3
+
+# 6. Confirm before serving.
+python -m api.doctor
+```
+
+Skipping step 3 no longer produces wrong numbers — the service refuses to pair
+a cohort or calibrator with weights that did not produce it — but it does mean
+the service will not start until you run it.
+
 ### Re-enrolment after a model change
 
 **Embeddings are model-specific.** Replacing the checkpoint invalidates every
@@ -128,6 +163,31 @@ python -m api.seed --reset --customers 10 --references 3
 
 Real data needs a migration instead; `python -m api.doctor` names the columns
 that differ. Production should be on Alembic, which this POC is not.
+
+**Scores look plausible but every forgery passes**
+
+The likeliest cause is that `cohort.npz` and `calibrator.json` were produced by
+a *different checkpoint* than the one being served. Both are functions of a
+specific embedding space; paired with other weights they produce numbers in an
+entirely normal range that mean nothing.
+
+This shipped once. Two thirds of skilled forgeries scored 99.5 out of 100, and
+the demo looked like a system working perfectly. Nothing caught it because
+`model_version` was `architecture@git_commit`, every checkpoint reported
+`signet@unknown`, and so every staleness check compared two identical
+meaningless strings.
+
+The service now refuses to start in that state, `model_version` is a hash of
+the weights themselves, and `python -m api.doctor` checks the pairing. If you
+hit it:
+
+```bash
+python -m ml.eval.benchmark --checkpoint <the checkpoint you serve> --split test
+python -m api.reenrol --apply
+```
+
+Always regenerate the cohort and calibrator **together**, from the checkpoint
+you intend to serve. They are a matched set of three.
 
 **"Could not decrypt … the image encryption key has changed"**
 `SV_IMAGE_ENCRYPTION_KEY` differs from the one used at enrolment. Restore the

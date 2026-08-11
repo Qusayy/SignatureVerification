@@ -82,6 +82,7 @@ def health() -> HealthOut:
         model_loaded=status_info["model_loaded"],
         model_version=status_info["model_version"],
         cohort_normalisation=status_info["cohort_normalisation"],
+        writer_normalisation=status_info.get("writer_normalisation", False),
         calibrated=status_info["calibrated"],
         advisory_only=settings.advisory_only,
         warnings=settings.production_warnings(),

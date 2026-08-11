@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -155,12 +156,50 @@ def check_artifacts(report: Report) -> None:
                 "--split test",
             ],
         )
-    for name, path in (
-        ("cohort", settings.cohort_path),
-        ("calibrator", settings.calibrator_path),
-    ):
-        if path.exists():
-            report.add(name, OK, str(path))
+    # Do the artifacts actually belong to this checkpoint? Until this check
+    # existed, `cohort.npz` and `calibrator.json` produced by one training run
+    # were served alongside another run's weights, and the only symptom was
+    # that two thirds of skilled forgeries scored 99.5 out of 100.
+    from ml.embed.provenance import read_weights_id
+    from ml.scoring.calibrate import ScoreCalibrator
+    from ml.scoring.znorm import CohortNormalizer
+
+    try:
+        model_id = read_weights_id(settings.checkpoint_path)
+    except Exception as exc:  # noqa: BLE001 - surfaced as a check, not a crash
+        report.add("artifact identity", FAIL, f"could not read the checkpoint: {exc}")
+        return
+
+    stamps: list[tuple[str, Path, str]] = []
+    if settings.cohort_path.exists():
+        stamps.append(
+            ("cohort", settings.cohort_path, getattr(CohortNormalizer.load(settings.cohort_path), "weights_id", ""))
+        )
+    if settings.calibrator_path.exists():
+        stamps.append(
+            ("calibrator", settings.calibrator_path, ScoreCalibrator.load(settings.calibrator_path).weights_id)
+        )
+
+    for name, path, stamp in stamps:
+        if stamp == model_id:
+            report.add(name, OK, f"{path} (weights {model_id})")
+        else:
+            report.add(
+                name,
+                FAIL,
+                (
+                    f"produced by weights {stamp}, but the checkpoint is {model_id}"
+                    if stamp
+                    else f"carries no weights stamp and cannot be matched to {model_id}"
+                ),
+                [
+                    "A cohort or calibrator from another run gives scores in a normal",
+                    "range that mean nothing. Regenerate both against this checkpoint:",
+                    f"  python -m ml.eval.benchmark --checkpoint {settings.checkpoint_path} "
+                    "--split test",
+                    "  python -m api.reenrol --apply",
+                ],
+            )
 
 
 def check_model(report: Report) -> str:
@@ -182,10 +221,22 @@ def check_model(report: Report) -> str:
         report.add("calibration", WARN, "placeholder calibrator; scores are uncalibrated")
     else:
         report.add("calibration", OK, "isotonic calibrator loaded")
-    if not status["cohort_normalisation"]:
-        report.add("cohort normalisation", WARN, "no cohort; S-norm disabled")
-    else:
-        report.add("cohort normalisation", OK, "enabled")
+    # Not a warning either way. Cohort normalisation is off by default because
+    # it measured worse; what matters is that scores are normalised somehow.
+    report.add(
+        "score normalisation",
+        OK if status.get("writer_normalisation") or status["cohort_normalisation"] else WARN,
+        ", ".join(
+            filter(
+                None,
+                [
+                    "writer-internal" if status.get("writer_normalisation") else "",
+                    "cohort S-norm" if status["cohort_normalisation"] else "",
+                ],
+            )
+        )
+        or "none; raw similarity is not comparable across customers",
+    )
     return status["model_version"] or ""
 
 

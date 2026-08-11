@@ -13,6 +13,8 @@ samples, mixing genuine samples and forgeries for each chosen writer.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import cv2
@@ -25,7 +27,51 @@ from ml.data.augment import DEFAULT_AUGMENT, AugmentConfig, augment_capture
 from ml.data.manifest import Manifest, Record
 from ml.preprocess.pipeline import preprocess_signature, to_model_input
 
-__all__ = ["SignatureDataset", "WriterBatchSampler"]
+__all__ = ["SignatureDataset", "WriterBatchSampler", "corpus_fingerprint"]
+
+
+def _corpus_fingerprint(manifest: Manifest) -> str:
+    """A short hash identifying which corpus, and which split assignment, this is.
+
+    Covers the root, every image path, and every split label — the three things
+    that decide what a cached canvas at a given position actually contains.
+    Two manifests sharing a cache directory therefore cannot collide, and
+    re-splitting the same manifest invalidates its entries rather than
+    silently reusing them under new labels.
+    """
+    digest = hashlib.sha1()
+    digest.update(str(manifest.root).encode("utf-8"))
+    for record in sorted(manifest.records, key=lambda r: r.image_path):
+        digest.update(f"{record.image_path}|{record.split}".encode())
+    return digest.hexdigest()[:12]
+
+
+# Public alias; the underscore version is the one used internally.
+corpus_fingerprint = _corpus_fingerprint
+
+
+def _record_cache_owner(cache_dir: Path, manifest: Manifest, fingerprint: str) -> None:
+    """Leave a note in the cache directory saying which corpora wrote into it.
+
+    Purely diagnostic — the keys are already collision-free. It exists so that
+    a directory full of opaque .npy files can be traced back to the manifest
+    that produced them, which is the first question anyone asks when a cache
+    is suspected.
+    """
+    meta_path = cache_dir / "cache_meta.json"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8")) if meta_path.exists() else {}
+    except (OSError, json.JSONDecodeError):
+        meta = {}
+
+    entry = {"root": str(manifest.root), "records": len(manifest.records)}
+    if meta.get(fingerprint) == entry:
+        return
+    meta[fingerprint] = entry
+    try:
+        meta_path.write_text(json.dumps(meta, indent=2), encoding="utf-8")
+    except OSError:
+        pass  # a read-only cache is usable; the note is not essential
 
 
 class SignatureDataset(Dataset):
@@ -61,8 +107,11 @@ class SignatureDataset(Dataset):
         self.augment_config = augment_config
         self.seed = seed
         self.cache_dir = Path(cache_dir) if cache_dir else None
+        # Namespaced by corpus, not by position in it. See `_canvas_cached`.
+        self.corpus_fingerprint = _corpus_fingerprint(manifest)
         if self.cache_dir:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
+            _record_cache_owner(self.cache_dir, manifest, self.corpus_fingerprint)
 
         signers = sorted({r.signer_id for r in self.records})
         self.writer_index = writer_index or {s: i for i, s in enumerate(signers)}
@@ -84,10 +133,24 @@ class SignatureDataset(Dataset):
         return image
 
     def _canvas_cached(self, index: int, record: Record) -> np.ndarray:
-        """Preprocess once and reuse. Only valid when not augmenting."""
+        """Preprocess once and reuse. Only valid when not augmenting.
+
+        The key is content-addressed — corpus fingerprint plus image path —
+        rather than ``f"{split}_{index}"``. Position in a manifest is not a
+        stable identity: ``ml.data.ingest`` appends, and ``manifest split``
+        reshuffles which signers land in which split, so both renumber records
+        without changing anything a positional key would notice.
+
+        The consequence was specific and silent. Augmented reads bypass this
+        cache entirely, so a stale entry never reaches training — it reaches
+        *validation and test*, which is to say every number the project
+        reports, while nothing errors and the images look plausible.
+        """
         if self.cache_dir is None:
             return preprocess_signature(self._load_raw(record), strict=False).image
-        cache_path = self.cache_dir / f"{self.split}_{index:07d}.npy"
+
+        stem = hashlib.sha1(record.image_path.encode("utf-8")).hexdigest()[:16]
+        cache_path = self.cache_dir / f"{self.corpus_fingerprint}_{self.split}_{stem}.npy"
         if cache_path.exists():
             return np.load(cache_path)
         canvas = preprocess_signature(self._load_raw(record), strict=False).image

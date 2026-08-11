@@ -132,18 +132,32 @@ class CohortNormalizer:
 
     # -- persistence ------------------------------------------------------
 
-    def save(self, path: Path | str) -> Path:
+    def save(self, path: Path | str, *, weights_id: str = "") -> Path:
+        """Persist the cohort, stamped with the weights that produced it.
+
+        The stamp is not bookkeeping. Cohort vectors are embeddings, so they
+        are only meaningful under the model that produced them; pairing them
+        with different weights yields z-scores that look entirely normal and
+        mean nothing. That exact mistake shipped — see
+        :meth:`ml.scoring.verifier.Verifier.from_artifacts`.
+        """
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(
-            path, embeddings=self.embeddings.astype(np.float32), signers=np.array(self.signers)
+            path,
+            embeddings=self.embeddings.astype(np.float32),
+            signers=np.array(self.signers),
+            weights_id=np.array(weights_id),
         )
         return path
 
     @classmethod
     def load(cls, path: Path | str) -> CohortNormalizer:
         payload = np.load(Path(path), allow_pickle=False)
-        return cls(payload["embeddings"], list(payload["signers"]))
+        normalizer = cls(payload["embeddings"], list(payload["signers"]))
+        # Absent on cohorts written before the stamp existed.
+        normalizer.weights_id = str(payload["weights_id"]) if "weights_id" in payload else ""
+        return normalizer
 
     @classmethod
     def from_embeddings_by_signer(

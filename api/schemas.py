@@ -180,6 +180,7 @@ class HealthOut(BaseModel):
     model_loaded: bool
     model_version: str | None
     cohort_normalisation: bool
+    writer_normalisation: bool = False
     calibrated: bool
     advisory_only: bool
     warnings: list[str]

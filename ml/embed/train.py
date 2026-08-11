@@ -29,12 +29,21 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from ml.config import ARTIFACT_ROOT, MODEL, SCORING, TRACK_A, TRACK_B, TRAIN, resolve_device
+from ml.config import (
+    ARTIFACT_ROOT,
+    MODEL,
+    SCORING,
+    TRACK_A,
+    TRACK_B,
+    TRAIN,
+    ModelConfig,
+    resolve_device,
+)
 from ml.data.manifest import DEFAULT_MANIFEST_PATH, Manifest, assert_no_leakage, assert_track_b
 from ml.embed.dataset import SignatureDataset, WriterBatchSampler, collate
 from ml.embed.losses import CombinedLoss
 from ml.embed.models import build_model
-from ml.embed.provenance import Provenance
+from ml.embed.provenance import Provenance, weights_id
 from ml.eval.metrics import compute_metrics
 
 # --------------------------------------------------------------------------
@@ -186,7 +195,12 @@ def train(args: argparse.Namespace) -> Path:
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 5.0)
+            # Clip the criterion too. The ArcFace weight matrix is in the
+            # optimizer (see above) but was excluded here, leaving the one
+            # parameter with the largest and spikiest gradients unclipped.
+            torch.nn.utils.clip_grad_norm_(
+                list(model.parameters()) + list(criterion.parameters()), 5.0
+            )
             optimizer.step()
 
             totals.update(parts)
@@ -206,14 +220,20 @@ def train(args: argparse.Namespace) -> Path:
                 entry["val_tar_at_far_1pct"] = round(metrics.tar_at_far[0.01], 4)
                 if metrics.eer < best_eer:
                     best_eer = metrics.eer
-                    _save(checkpoint_path, model, criterion, args, manifest, train_ds, licence_track, metrics.eer)
+                    _save(
+                        checkpoint_path, model, criterion, args, manifest, train_ds,
+                        licence_track, metrics.eer, model_cfg,
+                    )
                     entry["saved"] = True
 
         history.append(entry)
         print(json.dumps(entry))
 
     if best_eer == float("inf"):  # no validation split — save the final weights
-        _save(checkpoint_path, model, criterion, args, manifest, train_ds, licence_track, None)
+        _save(
+            checkpoint_path, model, criterion, args, manifest, train_ds,
+            licence_track, None, model_cfg,
+        )
 
     (checkpoint_path.with_suffix(".history.json")).write_text(json.dumps(history, indent=2))
     print(f"\nBest validation EER (skilled forgeries): {best_eer:.4f}")
@@ -230,6 +250,7 @@ def _save(
     dataset: SignatureDataset,
     licence_track: str,
     val_eer: float | None,
+    model_cfg: ModelConfig,
 ) -> None:
     train_records = manifest.by_split("train")
     provenance = Provenance(
@@ -243,15 +264,33 @@ def _save(
         pretrained_init="imagenet/resnet34" if args.pretrained else None,
         manifest_path=str(args.manifest),
         notes=args.notes,
+        hyperparameters={
+            "lr": args.lr,
+            "epochs": args.epochs,
+            "seed": args.seed,
+            "writers_per_batch": args.writers_per_batch,
+            "samples_per_writer": args.samples_per_writer,
+            "batches_per_epoch": args.batches_per_epoch,
+            "forgery_weight": model_cfg.forgery_loss_weight,
+            "augment": not args.no_augment,
+        },
     )
+    state = model.state_dict()
     torch.save(
         {
-            "model_state": model.state_dict(),
+            "model_state": state,
             "criterion_state": criterion.state_dict(),
             "architecture": args.arch,
             "embedding_dim": model.embedding_dim,
             "writer_index": dataset.writer_index,
-            "config": {"model": MODEL.__dict__, "crop_size": list(dataset[0]["image"].shape[1:])},
+            # `model_cfg`, not `MODEL`: the module default records
+            # forgery_loss_weight=0.95 even for a run that passed 0.5, as every
+            # checkpoint in artifacts/ demonstrates.
+            "config": {
+                "model": dict(model_cfg.__dict__),
+                "crop_size": list(dataset[0]["image"].shape[1:]),
+            },
+            "weights_id": weights_id(state),
             "val_eer_skilled": val_eer,
             "provenance": provenance.to_dict(),
         },

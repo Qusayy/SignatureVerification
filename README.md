@@ -182,14 +182,55 @@ harness reports EER against *skilled* forgeries, TAR at fixed FAR, and a
 per-script breakdown, and refuses to emit a headline figure from a
 synthetic-only corpus.
 
-Two things dominate real accuracy, in order:
+Three things dominate real accuracy, in order:
 
-1. **Training writer count.** Published results reaching ~2.7% EER used ~3,200
+1. **The scoring recipe, not just the model.** Holding the weights fixed and
+   changing only how embedding distances become a score moved EER by ~15
+   points on the sealed test set. Every score is expressed relative to how
+   consistently that customer signs — the mean pairwise similarity among their
+   own specimens — which asks the question a skilled forgery is built to
+   defeat. Cohort z/t/s-normalisation is implemented but **off by default**:
+   it measured worse here, because it answers the random-impostor question,
+   which was already solved. Every benchmark reports both recipes side by
+   side so the choice stays evidence-led per corpus.
+2. **Training writer count.** Published results reaching ~2.7% EER used ~3,200
    writers. `ml/eval/ablation.py` measures the curve for your corpus, and
    refuses to run a step budget too small to converge — an undertrained sweep
    produces a curve that slopes the wrong way and reads as "more data hurts".
-2. **Capture channel.** Offline verification from images of paper has a real
+3. **Capture channel.** Offline verification from images of paper has a real
    floor. See [`docs/capture-options.md`](docs/capture-options.md).
+
+Measured on the sealed 200-signer test split, one checkpoint, identical
+comparisons, only the scoring recipe varying:
+
+| Recipe | EER | 95% CI | AUC | TAR @ FAR 1% |
+|---|---|---|---|---|
+| cohort S-norm (previous default) | 35.80% | 34.0–37.8 | 0.703 | 4.10% |
+| raw similarity | 23.90% | 21.9–25.6 | 0.849 | **9.50%** |
+| **writer-internal (current)** | **20.10%** | 18.4–21.4 | **0.878** | 4.90% |
+| writer-internal + cohort | 30.40% | 28.6–32.3 | 0.769 | 6.30% |
+
+Note the tension the EER hides: at FAR = 1% the plain raw similarity is the
+better recipe. Writer normalisation improves the middle of the curve more than
+the strict tail. EER and AUC are the right target here because the system is
+advisory and bands uncertain cases amber rather than auto-accepting — but
+**neither recipe supports a high-precision auto-accept threshold**, and a
+deployment that wanted one would need to re-take this decision.
+
+**Two numbers, always reported separately.** Skilled-forgery EER (someone
+practising your signature) and random-impostor EER (a stranger signing your
+name) differ by orders of magnitude — currently 20.1% versus 0.0% on this
+corpus. Quoting the combined figure is the most common way signature
+verification accuracy gets overstated.
+
+Every EER now carries a **writer-level bootstrap confidence interval**. On a
+200-signer test set that is roughly ±1.5 points, so an unpaired difference
+below ~3 points is not evidence of anything. Read the interval before
+concluding a change helped.
+
+**Artifacts are bound to weights.** A checkpoint, its cohort and its calibrator
+are a matched set of three; the service refuses to load a mismatched one rather
+than serving confident nonsense. See the runbook.
 
 ## Tests
 

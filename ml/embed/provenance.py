@@ -9,8 +9,10 @@ answer has to come from the file itself rather than from anyone's memory.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +20,72 @@ from typing import Any
 
 from ml.config import TRACK_B
 
-__all__ = ["Provenance", "assert_deployable", "read_provenance"]
+__all__ = [
+    "Provenance",
+    "assert_deployable",
+    "read_provenance",
+    "weights_id",
+    "read_weights_id",
+    "UNKNOWN_WEIGHTS_ID",
+]
+
+# Recorded for artifacts produced before weights were identified, so the
+# distinction between "verified to match" and "cannot be verified" survives.
+UNKNOWN_WEIGHTS_ID = ""
+
+
+def weights_id(state: Mapping[str, Any]) -> str:
+    """A content hash of a model's weights.
+
+    **Why not the git commit.** ``model_version`` used to be
+    ``f"{architecture}@{git_commit[:8]}"``, which identifies the *code* that
+    produced a weight and not the weight itself. Two consequences, both of
+    which bit:
+
+    * Every checkpoint in ``artifacts/`` reports ``signet@unknown``, because
+      training ran where ``git rev-parse`` failed. Any two of them compare
+      equal, so every staleness check silently passes.
+    * Retraining twice at the same commit — the normal inner loop of an
+      accuracy experiment — produces two different models with one version
+      string.
+
+    A hash over the tensors has neither problem: it changes when and only when
+    the weights change, and it is computable from a checkpoint alone with no
+    repository, no history and no build metadata.
+    """
+    digest = hashlib.sha256()
+    for key in sorted(state):
+        value = state[key]
+        digest.update(key.encode("utf-8"))
+        if not hasattr(value, "detach"):  # ints and floats appear in some heads
+            digest.update(repr(value).encode("utf-8"))
+            continue
+        tensor = value.detach().to("cpu").contiguous()
+        digest.update(f"{tuple(tensor.shape)}|{tensor.dtype}".encode())
+        try:
+            digest.update(tensor.numpy().tobytes())
+        except (TypeError, ValueError):
+            # bfloat16 and friends have no numpy equivalent. The dtype is
+            # already in the digest, so widening here cannot collide two
+            # genuinely different dtypes.
+            digest.update(tensor.float().numpy().tobytes())
+    return digest.hexdigest()[:16]
+
+
+def read_weights_id(checkpoint_path: Path | str) -> str:
+    """The recorded weights id of a checkpoint, computing it if absent.
+
+    Checkpoints written before this existed carry no id. Rather than refusing
+    them, recompute from ``model_state`` — the hash is a pure function of the
+    weights, so a recomputed id is exactly as trustworthy as a stored one.
+    """
+    import torch
+
+    payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    recorded = payload.get("weights_id")
+    if recorded:
+        return str(recorded)
+    return weights_id(payload["model_state"])
 
 
 def _git_commit() -> str:
@@ -51,6 +118,10 @@ class Provenance:
     git_commit: str = field(default_factory=_git_commit)
     created_at: str = field(default_factory=lambda: datetime.now(UTC).isoformat())
     notes: str = ""
+    # The run that produced this weight. Absent from earlier checkpoints, which
+    # is why every one of them claims the module-default hyperparameters
+    # regardless of what was actually passed on the command line.
+    hyperparameters: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

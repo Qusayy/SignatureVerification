@@ -5,6 +5,15 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <!-- Biometric data on screen: never let a browser or proxy cache it. -->
     <meta http-equiv="Cache-Control" content="no-store" />
+    <!-- Paints the browser chrome and the pre-hydration canvas to match the
+         app, so there is no white flash before the first render. -->
+    <meta name="color-scheme" content="dark" />
+    <meta name="theme-color" content="#0a0e14" />
+    <style>
+      html {
+        background: #0a0e14;
+      }
+    </style>
     <title>Signature Verification</title>
   </head>
   <body>

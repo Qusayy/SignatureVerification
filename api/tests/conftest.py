@@ -16,10 +16,35 @@ import pytest
 
 from ml.config import ARTIFACT_ROOT
 
-CHECKPOINT = ARTIFACT_ROOT / "signet_track_b.pt"
+def _matching_checkpoint() -> Path:
+    """The checkpoint that `artifacts/cohort.npz` was actually built from.
+
+    These are end-to-end tests against the real artifact directory, and the
+    service now refuses to pair a cohort or calibrator with weights that did
+    not produce it. Hard-coding a checkpoint name here made the whole suite
+    depend on which model was benchmarked last — which is exactly the coupling
+    that let a mismatched set reach the demo unnoticed.
+    """
+    from ml.embed.provenance import read_weights_id
+    from ml.scoring.znorm import CohortNormalizer
+
+    candidates = sorted(ARTIFACT_ROOT.glob("*.pt"))
+    cohort_path = ARTIFACT_ROOT / "cohort.npz"
+    if cohort_path.exists():
+        wanted = getattr(CohortNormalizer.load(cohort_path), "weights_id", "")
+        for path in candidates:
+            try:
+                if wanted and read_weights_id(path) == wanted:
+                    return path
+            except Exception:  # noqa: BLE001 - a broken checkpoint is simply not a match
+                continue
+    return candidates[0] if candidates else ARTIFACT_ROOT / "signet_track_b.pt"
+
+
+CHECKPOINT = _matching_checkpoint()
 requires_model = pytest.mark.skipif(
     not CHECKPOINT.exists(),
-    reason=f"No checkpoint at {CHECKPOINT}. Run: python -m ml.embed.train",
+    reason=f"No checkpoint in {ARTIFACT_ROOT}. Run: python -m ml.embed.train",
 )
 
 

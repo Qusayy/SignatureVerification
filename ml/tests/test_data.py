@@ -200,3 +200,91 @@ def test_augmentation_is_deterministic_per_seed(raw_signature):
 def test_rotation_stays_small_enough_to_preserve_identity():
     """Guard the config itself: large rotations would destroy the signal."""
     assert DEFAULT_AUGMENT.max_rotate_deg <= 5.0
+
+
+# --------------------------------------------------------------------------
+# Embedding cache isolation
+#
+# The cache key used to be f"{split}_{index}". Position in a manifest is not a
+# stable identity: `ml.data.ingest` appends and `manifest split` reshuffles, so
+# both renumber records. Augmented reads bypass the cache, so a stale entry
+# never reached training — it reached validation and test, which is every
+# number the project reports, silently and with plausible-looking images.
+# --------------------------------------------------------------------------
+
+
+def test_cache_fingerprint_distinguishes_two_corpora(tmp_path):
+    from ml.embed.dataset import corpus_fingerprint
+
+    a = _manifest_with(tmp_path, ["a/one.png", "a/two.png"])
+    b = _manifest_with(tmp_path, ["b/one.png", "b/two.png"])
+    assert corpus_fingerprint(a) != corpus_fingerprint(b)
+
+
+def test_cache_fingerprint_changes_when_the_split_changes(tmp_path):
+    from ml.embed.dataset import corpus_fingerprint
+
+    manifest = _manifest_with(tmp_path, ["x/one.png", "x/two.png"])
+    before = corpus_fingerprint(manifest)
+    manifest.records[0].split = "test"
+    assert corpus_fingerprint(manifest) != before
+
+
+def test_cache_fingerprint_is_order_independent(tmp_path):
+    """Appending a source must not invalidate entries for the others."""
+    from ml.embed.dataset import corpus_fingerprint
+
+    forward = _manifest_with(tmp_path, ["p/one.png", "p/two.png"])
+    reversed_ = _manifest_with(tmp_path, ["p/two.png", "p/one.png"])
+    assert corpus_fingerprint(forward) == corpus_fingerprint(reversed_)
+
+
+def _manifest_with(root, paths):
+    from ml.data.manifest import Manifest, Record
+
+    return Manifest(
+        root=root,
+        records=[
+            Record(image_path=p, signer_id=f"s:{i}", label="genuine", split="train")
+            for i, p in enumerate(paths)
+        ],
+    )
+
+
+def test_two_manifests_sharing_a_cache_do_not_collide(tmp_path):
+    """The real failure: same cache directory, different corpora, silent reuse."""
+    import cv2
+
+    from ml.data.manifest import Manifest, Record
+    from ml.embed.dataset import SignatureDataset
+
+    cache = tmp_path / "cache"
+
+    def corpus(name: str, shape: str) -> Manifest:
+        root = tmp_path / name
+        (root / "s").mkdir(parents=True, exist_ok=True)
+        image = np.full((80, 200), 255, np.uint8)
+        if shape == "loop":
+            cv2.ellipse(image, (100, 40), (70, 22), 0, 0, 300, 0, 4)
+        else:
+            # A visibly different mark: preprocessing normalises tone and size
+            # away, so the two corpora have to differ in shape to differ at all.
+            for x in range(20, 180, 20):
+                cv2.line(image, (x, 15), (x + 10, 65), 0, 4)
+        cv2.imwrite(str(root / "s" / "one.png"), image)
+        return Manifest(
+            root=root,
+            records=[
+                Record(image_path="s/one.png", signer_id="s:0", label="genuine", split="train")
+            ],
+        )
+
+    first = SignatureDataset(corpus("first", "loop"), "train", augment=False, cache_dir=cache)
+    second = SignatureDataset(corpus("second", "zigzag"), "train", augment=False, cache_dir=cache)
+
+    a = first[0]["image"].numpy()
+    b = second[0]["image"].numpy()
+
+    # Different source images must not resolve to the same cached canvas.
+    assert not np.array_equal(a, b)
+    assert (cache / "cache_meta.json").exists()

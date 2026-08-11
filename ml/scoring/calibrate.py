@@ -22,6 +22,7 @@ for the employee, who always makes the final call.
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -70,6 +71,10 @@ class ScoreCalibrator:
     n_fit_genuine: int = 0
     n_fit_impostor: int = 0
     fitted_on: str = ""
+    # The weights whose score distribution this curve was fitted to. A curve
+    # applied to a different model maps the wrong z-scores onto confidence,
+    # which is how two thirds of skilled forgeries came to print 99.5.
+    weights_id: str = ""
 
     # -- fitting ----------------------------------------------------------
 
@@ -80,7 +85,9 @@ class ScoreCalibrator:
         impostor_scores: np.ndarray | list[float],
         *,
         fitted_on: str = "",
+        weights_id: str = "",
         clip: tuple[float, float] = (0.005, 0.995),
+        min_samples: int = 10,
     ) -> ScoreCalibrator:
         """Fit the calibration curve on held-out comparison scores.
 
@@ -97,10 +104,22 @@ class ScoreCalibrator:
 
         g = np.asarray(genuine_scores, dtype=float).ravel()
         i = np.asarray(impostor_scores, dtype=float).ravel()
-        if len(g) < 10 or len(i) < 10:
+        if len(g) < min_samples or len(i) < min_samples:
             raise ValueError(
                 f"Too few scores to calibrate ({len(g)} genuine, {len(i)} impostor); "
-                "need at least 10 of each and realistically hundreds."
+                f"need at least {min_samples} of each and realistically hundreds."
+            )
+        if len(g) < 200 or len(i) < 200:
+            # Not fatal — the stack has to run on a small corpus — but say it
+            # plainly. The shipped curve was fitted on 72/96 and collapsed to a
+            # five-step staircase that saturated at 0.995, so every score above
+            # a modest threshold printed as 99.5 regardless of how good it was.
+            warnings.warn(
+                f"Calibrating on {len(g)} genuine / {len(i)} impostor comparisons. Below "
+                "roughly 200 of each the isotonic fit degenerates into a few coarse steps "
+                "and the 0-100 score stops discriminating near the top of its range. "
+                "Enlarge the validation split before quoting calibrated scores.",
+                stacklevel=2,
             )
 
         scores = np.concatenate([g, i])
@@ -127,6 +146,7 @@ class ScoreCalibrator:
             n_fit_genuine=len(g),
             n_fit_impostor=len(i),
             fitted_on=fitted_on,
+            weights_id=weights_id,
         )
 
     # -- application ------------------------------------------------------
@@ -160,6 +180,7 @@ class ScoreCalibrator:
                     "n_fit_genuine": self.n_fit_genuine,
                     "n_fit_impostor": self.n_fit_impostor,
                     "fitted_on": self.fitted_on,
+                    "weights_id": self.weights_id,
                 },
                 indent=2,
             )
@@ -175,6 +196,7 @@ class ScoreCalibrator:
             n_fit_genuine=payload.get("n_fit_genuine", 0),
             n_fit_impostor=payload.get("n_fit_impostor", 0),
             fitted_on=payload.get("fitted_on", ""),
+            weights_id=payload.get("weights_id", ""),
         )
 
     @classmethod

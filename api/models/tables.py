@@ -101,9 +101,15 @@ class ReferenceSignature(Base):
 class CustomerEnrolment(Base):
     """Cached per-customer scoring state, refreshed when specimens change.
 
-    Holds the Z-norm statistics, which depend only on the customer's specimens
-    and the background cohort. Recomputing them on every verification would
-    mean scoring the whole cohort at the operator's desk for no benefit.
+    Everything here depends only on the customer's specimens, so recomputing it
+    on every verification would be work done at the operator's desk for no
+    benefit.
+
+    ``model_version`` is a weights hash (see
+    :func:`ml.embed.provenance.weights_id`), not a git commit. It used to be
+    the latter, which meant every checkpoint reported ``signet@unknown`` and
+    the staleness checks in ``api/doctor.py`` and ``api/reenrol.py`` compared
+    two identical meaningless strings and always passed.
     """
 
     __tablename__ = "customer_enrolments"
@@ -111,6 +117,10 @@ class CustomerEnrolment(Base):
     customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"), primary_key=True)
     cohort_mean: Mapped[float] = mapped_column(Float)
     cohort_std: Mapped[float] = mapped_column(Float)
+    # Mean pairwise similarity among this customer's own specimens: how
+    # consistently they sign. Every score is expressed relative to it, so it is
+    # cached here rather than recomputed per verification.
+    intra_reference_mean: Mapped[float] = mapped_column(Float, default=0.0)
     model_version: Mapped[str] = mapped_column(String(64), default="")
     n_references: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

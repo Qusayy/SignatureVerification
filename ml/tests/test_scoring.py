@@ -306,7 +306,13 @@ class _StubModel:
         return torch.from_numpy(np.tile(vector, (tensor.shape[0], 1)).astype(np.float32))
 
 
-def test_verifier_flags_missing_cohort_and_calibration():
+def test_verifier_flags_an_unnormalisable_single_specimen():
+    """One specimen on file leaves the score without a per-customer baseline.
+
+    Specimen agreement is the mean similarity *between* a customer's specimens,
+    so a customer with one has none, and their score is not comparable with
+    anyone else's. That has to be visible rather than implied.
+    """
     from ml.data.synth import make_signer, render_signature
 
     rng = np.random.default_rng(9)
@@ -318,11 +324,30 @@ def test_verifier_flags_missing_cohort_and_calibration():
     enrolment = verifier.enrol("C1", [image])
     result = verifier.verify(image, enrolment)
 
-    assert "no_cohort_normalisation" in result.warnings
+    assert "score_not_writer_normalised" in result.warnings
     assert "uncalibrated_score_placeholder" in result.warnings
     assert "single_reference_lower_confidence" in result.warnings
+    assert result.comparison.is_writer_normalised is False
     assert result.calibrated is False
     assert result.to_dict()["advisory_only"] is True
+
+
+def test_several_specimens_are_writer_normalised():
+    from ml.data.synth import make_signer, render_signature
+
+    rng = np.random.default_rng(9)
+    model = _StubModel({0: rng.normal(size=DIM)})
+    verifier = Verifier(model, cohort=None, calibrator=None, device="cpu")  # type: ignore[arg-type]
+
+    style = make_signer("C1", "latin", rng)
+    references = [render_signature(style, rng, kind="genuine") for _ in range(3)]
+
+    enrolment = verifier.enrol("C1", references)
+    result = verifier.verify(references[0], enrolment)
+
+    assert result.comparison.is_writer_normalised
+    assert "score_not_writer_normalised" not in result.warnings
+    assert enrolment.reference_mean is not None
 
 
 def test_verifier_rejects_enrolment_with_no_references():

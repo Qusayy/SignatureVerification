@@ -25,7 +25,7 @@ import numpy as np
 import torch
 
 from ml.config import ARTIFACT_ROOT, PREPROCESS
-from ml.embed.models import build_model
+from ml.embed.models import load_checkpoint
 
 __all__ = ["export"]
 
@@ -39,14 +39,15 @@ def export(
     batch_size: int = 4,
 ) -> dict:
     """Export ``checkpoint`` to ONNX and verify it numerically."""
-    payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    model, payload = load_checkpoint(checkpoint)
     architecture = payload.get("architecture", "signet")
-
-    model = build_model(architecture)
-    model.load_state_dict(payload["model_state"])
     model.eval()
 
-    example = torch.rand(batch_size, 1, *PREPROCESS.crop_size)
+    # The checkpoint's own crop size, not the current module default: a model
+    # trained at another resolution would otherwise be traced at the wrong
+    # input shape and exported as a silently different network.
+    crop = tuple(payload.get("config", {}).get("crop_size") or PREPROCESS.crop_size)
+    example = torch.rand(batch_size, 1, *crop)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     torch.onnx.export(

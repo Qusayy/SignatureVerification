@@ -25,10 +25,10 @@ from ml.preprocess.pipeline import (
 )
 from ml.preprocess.trace import PipelineTrace, vector_strip
 from ml.scoring.calibrate import Band, ScoreCalibrator
-from ml.scoring.compare import ComparisonScore, compare_to_references
+from ml.scoring.compare import ComparisonScore, compare_to_references, intra_reference_mean
 from ml.scoring.znorm import CohortNormalizer, CohortStats
 
-__all__ = ["Verifier", "VerificationResult", "EnrolmentBundle"]
+__all__ = ["Verifier", "VerificationResult", "EnrolmentBundle", "ArtifactMismatch"]
 
 
 @dataclass
@@ -39,10 +39,19 @@ class EnrolmentBundle:
     embeddings: np.ndarray  # (N, D), L2-normalised
     cohort_stats: CohortStats | None = None
     canvases: list[np.ndarray] = field(default_factory=list)  # for the overlay and copy check
+    # Mean pairwise similarity among this customer's own specimens, computed
+    # once at enrolment. None means "not cached" and it is recomputed per
+    # verification, which is correct but wasteful.
+    reference_mean: float | None = None
 
     @property
     def n_references(self) -> int:
         return int(self.embeddings.shape[0])
+
+    def resolved_reference_mean(self) -> float:
+        if self.reference_mean is not None:
+            return self.reference_mean
+        return intra_reference_mean(self.embeddings)
 
 
 @dataclass
@@ -75,6 +84,35 @@ class VerificationResult:
             "model_version": self.model_version,
             "advisory_only": True,
         }
+
+
+class ArtifactMismatch(RuntimeError):
+    """A cohort or calibrator does not belong to the loaded weights."""
+
+
+def _assert_same_weights(path: Path, artifact_id: str, model_id: str, checkpoint: Path) -> None:
+    """Refuse an artifact that was not produced by these weights.
+
+    An unstamped artifact predates the check and cannot be verified either way.
+    Refusing it too is deliberate: regenerating is cheap, and the failure this
+    guards against is silent and produces confident wrong numbers.
+    """
+    if artifact_id == model_id:
+        return
+
+    detail = (
+        f"was produced by weights {artifact_id}"
+        if artifact_id
+        else "carries no weights stamp, so it predates this check and cannot be verified"
+    )
+    raise ArtifactMismatch(
+        f"{path.name} {detail}, but the loaded checkpoint is {model_id}.\n"
+        "Scores computed from mismatched artifacts land in a normal-looking range and "
+        "are meaningless. Regenerate both against this checkpoint:\n"
+        f"    python -m ml.eval.benchmark --checkpoint {checkpoint} --split test\n"
+        "then re-embed the stored specimens:\n"
+        "    python -m api.reenrol --apply"
+    )
 
 
 def _canvas_iou(a: np.ndarray, b: np.ndarray) -> float:
@@ -124,34 +162,45 @@ class Verifier:
         Missing cohort or calibrator files are tolerated so the stack can run
         before they have been produced, but the result is flagged
         ``calibrated=False`` and must be labelled as such in the UI.
+
+        A cohort or calibrator produced by *different weights* is not tolerated.
+        Both are functions of a specific embedding space, and pairing them with
+        another model produces scores in an entirely normal-looking range that
+        mean nothing at all. That shipped: ``cohort.npz`` and
+        ``calibrator.json`` were built by one checkpoint while the service
+        loaded another, and the result was two thirds of skilled forgeries
+        printing 99.5 out of 100 — indistinguishable, on screen, from the
+        system working perfectly.
+
+        Raises:
+            ArtifactMismatch: the cohort or calibrator belongs to other weights.
         """
-        from ml.embed.models import build_model
+        from ml.embed.models import load_checkpoint
+        from ml.embed.provenance import weights_id as compute_weights_id
 
         checkpoint = Path(checkpoint or ARTIFACT_ROOT / "signet_track_b.pt")
-        payload = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        model, payload = load_checkpoint(checkpoint)
 
-        model = build_model(payload.get("architecture", "signet"))
-        model.load_state_dict(payload["model_state"])
+        model_id = payload.get("weights_id") or compute_weights_id(payload["model_state"])
 
         cohort = None
         cohort_path = Path(cohort_path or ARTIFACT_ROOT / "cohort.npz")
         if cohort_path.exists():
             cohort = CohortNormalizer.load(cohort_path)
+            _assert_same_weights(cohort_path, getattr(cohort, "weights_id", ""), model_id, checkpoint)
 
         calibrator = None
         calibrator_path = Path(calibrator_path or ARTIFACT_ROOT / "calibrator.json")
         if calibrator_path.exists():
             calibrator = ScoreCalibrator.load(calibrator_path)
-
-        provenance = payload.get("provenance", {})
-        version = f"{payload.get('architecture', '?')}@{provenance.get('git_commit', '?')[:8]}"
+            _assert_same_weights(calibrator_path, calibrator.weights_id, model_id, checkpoint)
 
         return cls(
             model,
             cohort=cohort,
             calibrator=calibrator,
             device=device,
-            model_version=version,
+            model_version=f"{payload.get('architecture', '?')}@{model_id}",
         )
 
     # -- embedding --------------------------------------------------------
@@ -190,7 +239,11 @@ class Verifier:
         embeddings = self.embed_canvases(canvases)
         stats = self.cohort.enrolment_stats(embeddings) if self.cohort else None
         return EnrolmentBundle(
-            signer_id=signer_id, embeddings=embeddings, cohort_stats=stats, canvases=canvases
+            signer_id=signer_id,
+            embeddings=embeddings,
+            cohort_stats=stats,
+            canvases=canvases,
+            reference_mean=intra_reference_mean(embeddings),
         )
 
     # -- verification -----------------------------------------------------
@@ -242,7 +295,12 @@ class Verifier:
                 model=self.model_version or "unversioned",
             )
 
-        comparison = compare_to_references(query_embedding, enrolment.embeddings)
+        comparison = compare_to_references(
+            query_embedding,
+            enrolment.embeddings,
+            writer_normalise=self.cfg.writer_normalise,
+            reference_mean=enrolment.resolved_reference_mean(),
+        )
 
         if trace:
             trace.add(
@@ -253,14 +311,16 @@ class Verifier:
                 "close reference cannot carry the result.",
                 kind="compare",
                 per_reference=[round(float(v), 4) for v in comparison.per_reference],
-                combined=round(float(comparison.raw), 4),
+                combined=round(
+                    float(comparison.raw + comparison.intra_reference_mean), 4
+                ),
                 best=round(float(comparison.max_similarity), 4),
                 worst=round(float(comparison.min_similarity), 4),
                 n_references=int(comparison.n_references),
             )
 
         warnings = list(preprocessed.warnings)
-        if self.cohort is not None:
+        if self.cohort is not None and self.cfg.cohort_normalise:
             normalized = self.cohort.snorm(
                 comparison.raw,
                 query_embedding,
@@ -268,24 +328,48 @@ class Verifier:
                 enrolment=enrolment.cohort_stats,
             )
         else:
-            # Without a cohort the raw similarity is passed straight through.
-            # It is not comparable across customers, so the caller must not
-            # apply a shared threshold to it.
+            # The comparison score goes through unchanged. It is already
+            # comparable across customers when writer normalisation applied,
+            # because it is expressed relative to each customer's own specimen
+            # consistency. Where it did not — a single specimen on file — it is
+            # not, and that case is warned about below.
             normalized = comparison.raw
-            warnings.append("no_cohort_normalisation")
+        if not comparison.is_writer_normalised and self.cfg.writer_normalise:
+            warnings.append("score_not_writer_normalised")
 
         if trace:
+            if comparison.is_writer_normalised:
+                caption = (
+                    "The similarity is re-expressed against how consistently this customer "
+                    "signs — the average agreement among their own specimens. The question "
+                    "becomes 'is this as close to the specimens as they are to each other?', "
+                    "which is what a skilled forgery is built to defeat. Someone with a very "
+                    "repeatable hand is held to a stricter standard than someone whose own "
+                    "signature varies."
+                )
+            else:
+                caption = (
+                    "Only one specimen is on file, so there is no way to measure how "
+                    "consistently this customer signs and the similarity is used as-is. "
+                    "Scores for single-specimen customers are less comparable than others."
+                )
             trace.add(
                 "cohort",
-                "Cohort normalisation",
-                "The raw similarity is re-expressed against how this signature scores "
-                "versus a background population of unrelated writers. A person whose "
-                "signature resembles many others is judged on a stricter scale than one "
-                "with a highly distinctive hand.",
+                "Normalised to the customer",
+                caption,
                 kind="score",
-                raw_similarity=round(float(comparison.raw), 4),
+                raw_similarity=round(
+                    float(comparison.raw + comparison.intra_reference_mean), 4
+                ),
+                specimen_agreement=round(float(comparison.intra_reference_mean), 4),
                 normalised=round(float(normalized), 4),
-                method="S-norm" if self.cohort is not None else "none (raw passed through)",
+                method=(
+                    "S-norm (cohort)"
+                    if (self.cohort is not None and self.cfg.cohort_normalise)
+                    else "writer-internal"
+                    if comparison.is_writer_normalised
+                    else "none (raw passed through)"
+                ),
             )
 
         score = self.calibrator.score_0_100(normalized)
