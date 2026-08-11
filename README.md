@@ -60,7 +60,10 @@ python -m ml.eval.benchmark --split test --by-script --cache-dir data/cache
 #    signers the model has never seen.
 python -m api.seed --customers 10 --references 3
 
-# 6. Run it
+# 6. Confirm everything lines up before starting the service
+python -m api.doctor
+
+# 7. Run it
 python -m uvicorn api.main:app --port 8000            # terminal 1
 npm --prefix web install && npm --prefix web run dev  # terminal 2 → :3000
 ```
@@ -69,7 +72,31 @@ Sign in as `demo` / `demo1234`. `data/demo_queries/<customer>/` holds
 `genuine_*.png` and `forgery_*.png` for each seeded customer — drag them into
 the verify screen to show both outcomes.
 
-Containerised alternative to step 6: `docker compose up`.
+Containerised alternative to step 7: `docker compose up`.
+
+### When something is broken
+
+```bash
+python -m api.doctor
+```
+
+Checks the secrets, the artifacts, the database schema, whether every stored
+image still decrypts, and whether stored embeddings match the loaded model.
+Every failure it reports comes with the command that fixes it.
+
+Run it first whenever the interface returns a 500 with no obvious cause. The
+faults it catches all look identical from the browser — a thumbnail that will
+not load, a verification that will not run — and none of them are visible from
+the error message alone.
+
+**After retraining**, stored embeddings mean nothing under the new model, and
+nothing about that failure is visible: scores keep arriving in the normal range
+and are quietly wrong. Either re-embed in place or rebuild the demo:
+
+```bash
+python -m api.reenrol --check && python -m api.reenrol --apply   # keep the data
+python -m api.seed --reset --customers 10 --references 3         # start over
+```
 
 ## How it works
 

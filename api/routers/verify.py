@@ -27,6 +27,7 @@ from api.schemas import (
     DecisionIn,
     DecisionOut,
     DetectionOut,
+    PipelineStageOut,
     VerificationOut,
 )
 from api.security.auth import current_employee
@@ -38,6 +39,18 @@ from ml.scoring.verifier import EnrolmentBundle
 from ml.scoring.znorm import CohortStats
 
 router = APIRouter(prefix="/api/verify", tags=["verification"])
+
+
+def _stage_url(store, customer_id: str, key: str, image, invert: bool) -> str:
+    """Persist one trace image and return the URL that serves it.
+
+    Trace images go through the same encrypted store as everything else. They
+    are derived from a biometric image and are just as identifying as the
+    original, so they get the same protection rather than being written
+    somewhere convenient.
+    """
+    stored = store.put_image(image, prefix=f"stages/{customer_id}")
+    return f"/api/images/{stored}" + ("?invert=1" if invert else "")
 
 
 def _load_enrolment(session: Session, customer: Customer, store) -> EnrolmentBundle:
@@ -80,6 +93,7 @@ async def verify_signature(
     bbox_y: int | None = Form(None),
     bbox_width: int | None = Form(None),
     bbox_height: int | None = Form(None),
+    explain: bool = Form(True),
     session: Session = Depends(get_session),
     employee: Employee = Depends(current_employee),
 ) -> VerificationOut:
@@ -87,6 +101,10 @@ async def verify_signature(
 
     Supplying a bounding box overrides automatic detection — an employee
     correcting the crop always wins over the detector.
+
+    ``explain`` captures every intermediate stage of the pipeline for the visual
+    replay. It costs a dozen extra image writes per verification, so a caller
+    that only wants the number should turn it off.
     """
     started = time.perf_counter()
 
@@ -106,7 +124,9 @@ async def verify_signature(
         bbox = (int(bbox_x), int(bbox_y), int(bbox_width), int(bbox_height))  # type: ignore[arg-type]
 
     try:
-        output = service.verify(image, enrolment, bbox=bbox, is_full_page=is_full_page)
+        output = service.verify(
+            image, enrolment, bbox=bbox, is_full_page=is_full_page, explain=explain
+        )
     except ModelNotLoaded as exc:
         raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     except BlankSignatureError as exc:
@@ -149,6 +169,22 @@ async def verify_signature(
     # if the row is not durable yet, that decision 404s.
     commit(session)
 
+    stages = [
+        PipelineStageOut(
+            key=stage.key,
+            title=stage.title,
+            caption=stage.caption,
+            kind=stage.kind,
+            image_url=(
+                _stage_url(store, customer.id, stage.key, stage.image, stage.invert_for_display)
+                if stage.image is not None
+                else None
+            ),
+            metrics=stage.metrics,
+        )
+        for stage in output.stages
+    ]
+
     detection_out = None
     if output.detection:
         x, y, w, h = output.detection.bbox
@@ -175,6 +211,7 @@ async def verify_signature(
         overlay_url=f"/api/images/{overlay_key}",
         page_url=f"/api/images/{page_key}" if page_key else None,
         reference_urls=[f"/api/images/{r.canvas_key}?invert=1" for r in customer.references],
+        stages=stages,
     )
 
 

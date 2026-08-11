@@ -13,14 +13,16 @@ than an explicit error.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
 import numpy as np
 
 from api.settings import get_settings
 from ml.detector.heuristic import Detection, detect_signature
-from ml.preprocess.pipeline import deskew_page
+from ml.preprocess.pipeline import deskew_page, estimate_page_skew, to_grayscale
+from ml.preprocess.trace import PipelineTrace, Stage
 from ml.scoring.explain import difference_overlay, reason_text
 from ml.scoring.verifier import EnrolmentBundle, VerificationResult, Verifier
 from ml.scoring.znorm import CohortStats
@@ -43,6 +45,18 @@ class PipelineOutput:
     crop: np.ndarray
     overlay: np.ndarray
     reason: str
+    stages: list[Stage] = field(default_factory=list)
+
+
+def _annotate_detection(page: np.ndarray, detection: Detection) -> np.ndarray:
+    """Draw the detected region on a copy of the page, for the trace."""
+    canvas = page if page.ndim == 3 else cv2.cvtColor(page, cv2.COLOR_GRAY2BGR)
+    canvas = canvas.copy()
+    x, y, w, h = detection.bbox
+    thickness = max(2, int(min(canvas.shape[:2]) * 0.004))
+    # BGR: amber, matching the accent the interface uses for the active stage.
+    cv2.rectangle(canvas, (x, y), (x + w, y + h), (0, 170, 255), thickness)
+    return canvas
 
 
 class InferenceService:
@@ -127,7 +141,11 @@ class InferenceService:
     # -- verification -----------------------------------------------------
 
     def locate_signature(
-        self, page: np.ndarray, *, bbox: tuple[int, int, int, int] | None = None
+        self,
+        page: np.ndarray,
+        *,
+        bbox: tuple[int, int, int, int] | None = None,
+        trace: PipelineTrace | None = None,
     ) -> tuple[np.ndarray, Detection | None]:
         """Find the signature on an uploaded page and return the crop.
 
@@ -135,21 +153,61 @@ class InferenceService:
             bbox: an employee-supplied region. When given, detection is skipped
                 entirely — a human correcting the crop must always win over the
                 detector.
+            trace: optional recorder for the capture, deskew and detection
+                stages.
         """
         if bbox is not None:
             x, y, w, h = bbox
             crop = page[max(0, y) : y + h, max(0, x) : x + w]
             if crop.size == 0:
                 raise ValueError("The supplied crop region is empty")
-            return crop, Detection(bbox, confidence=1.0, method="employee")
+            detection = Detection(bbox, confidence=1.0, method="employee")
+            if trace:
+                trace.add(
+                    "detect",
+                    "Region supplied by operator",
+                    "You drew this box, so automatic detection was skipped entirely. A "
+                    "human correcting the crop always overrides the detector.",
+                    image=_annotate_detection(page, detection),
+                    method="operator",
+                )
+            return crop, detection
 
         # Correct page rotation before locating anything. Skew estimation needs
         # the printed structure of the whole form, which the crop no longer has.
-        deskewed, _angle = deskew_page(page)
+        angle = estimate_page_skew(to_grayscale(page))
+        deskewed, applied = deskew_page(page, angle)
+        if trace:
+            trace.add(
+                "deskew",
+                "Page straightened",
+                "Skew is measured from the printed rules of the form, never from the "
+                "handwriting — a writer's own slant is one of the more stable things "
+                "that distinguishes them, so it is preserved, not corrected."
+                if abs(applied) >= 0.2
+                else "The printed rules on this page are already square, so no rotation "
+                "was applied. Skew is only ever measured from printed structure, never "
+                "from the handwriting.",
+                image=deskewed,
+                measured_deg=round(float(angle), 2),
+                applied_deg=round(float(applied), 2),
+            )
+
         detection = detect_signature(deskewed)
         if detection is None:
             raise ValueError(
                 "No signature region found on this page. Draw the box manually or rescan."
+            )
+        if trace:
+            trace.add(
+                "detect",
+                "Signature located",
+                "Candidate regions are scored on ink density, stroke connectivity and "
+                "aspect ratio. Printed text blocks and stamps score poorly on stroke "
+                "continuity, which is what separates them from handwriting.",
+                image=_annotate_detection(deskewed, detection),
+                confidence=round(float(detection.confidence), 3),
+                method=detection.method,
             )
         return detection.crop(deskewed), detection
 
@@ -160,8 +218,13 @@ class InferenceService:
         *,
         bbox: tuple[int, int, int, int] | None = None,
         is_full_page: bool = True,
+        explain: bool = False,
     ) -> PipelineOutput:
         """Run detection, preprocessing, scoring, and explanation.
+
+        Args:
+            explain: capture every intermediate stage for display. Adds image
+                copies and a dozen PNG encodes to the request, so it is opt-in.
 
         Raises:
             ModelNotLoaded: no usable model.
@@ -169,13 +232,34 @@ class InferenceService:
             ValueError: no signature could be located on the page.
         """
         verifier = self._require()
+        trace = PipelineTrace(enabled=explain)
+
+        if trace:
+            trace.add(
+                "capture",
+                "Captured image",
+                "Exactly what arrived from the scanner or camera. Nothing has been "
+                "altered yet.",
+                image=page_or_crop,
+                pixels=f"{page_or_crop.shape[1]}x{page_or_crop.shape[0]}",
+            )
 
         if is_full_page:
-            crop, detection = self.locate_signature(page_or_crop, bbox=bbox)
+            crop, detection = self.locate_signature(page_or_crop, bbox=bbox, trace=trace)
         else:
             crop, detection = page_or_crop, None
 
-        result = verifier.verify(crop, enrolment)
+        if trace and is_full_page:
+            trace.add(
+                "crop",
+                "Region extracted",
+                "Everything outside the signature is discarded. The rest of the form is "
+                "never embedded, never stored as a specimen and never scored.",
+                image=crop,
+                pixels=f"{crop.shape[1]}x{crop.shape[0]}",
+            )
+
+        result = verifier.verify(crop, enrolment, trace=trace)
 
         # Overlay against the *closest* specimen, not simply the first one.
         # When a customer's stored specimens differ from each other — signed
@@ -185,12 +269,24 @@ class InferenceService:
             result.query_canvas, self._closest_canvas(result, enrolment)
         )
 
+        if trace:
+            trace.add(
+                "overlay",
+                "Difference overlay",
+                "The captured signature laid over the closest specimen on file. Agreement "
+                "is grey; ink only in the capture is one colour and ink only in the "
+                "specimen the other. This is where a forger's hesitation shows.",
+                image=overlay,
+                compared_against="closest specimen on file",
+            )
+
         return PipelineOutput(
             result=result,
             detection=detection,
             crop=crop,
             overlay=overlay,
             reason=reason_text(result),
+            stages=trace.stages,
         )
 
     @staticmethod

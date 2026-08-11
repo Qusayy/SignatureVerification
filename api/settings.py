@@ -40,10 +40,13 @@ class Settings(BaseSettings):
     jwt_secret: str = DEV_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_ttl_minutes: int = 60
-    # Fernet key for encrypting signature images at rest. Generated per process
-    # when unset, which means images written by one run cannot be read by the
-    # next — acceptable for a demo, fatal in production, and warned about.
+    # Fernet key for encrypting signature images at rest. When unset outside
+    # production a key is generated *once* and cached on disk — see
+    # `resolved_encryption_key`. In production an unset key is fatal.
     image_encryption_key: str | None = None
+    # Where the generated development key is cached. Inside DATA_ROOT, which is
+    # git-ignored, so it never reaches a repository.
+    dev_key_path: Path = DATA_ROOT / ".image_key"
 
     # --- Model artifacts -------------------------------------------------
     checkpoint_path: Path = ARTIFACT_ROOT / "signet_track_b.pt"
@@ -74,8 +77,9 @@ class Settings(BaseSettings):
             )
         if not self.image_encryption_key:
             problems.append(
-                "SV_IMAGE_ENCRYPTION_KEY is unset; a throwaway key is generated per process "
-                "and stored images will be unreadable after restart"
+                f"SV_IMAGE_ENCRYPTION_KEY is unset; a generated key cached at "
+                f"{self.dev_key_path} is in use. Deleting that file makes every stored "
+                "image permanently unreadable"
             )
         if self.database_url.startswith("sqlite"):
             problems.append("SQLite is in use; PostgreSQL is expected in the datacenter")
@@ -93,11 +97,43 @@ class Settings(BaseSettings):
         return self.environment.lower() in {"production", "prod"}
 
     def resolved_encryption_key(self) -> str:
+        """The Fernet key used to encrypt stored images.
+
+        Outside production a missing key is generated **once** and cached on
+        disk rather than regenerated per process. That distinction is the whole
+        point of this method: with a per-process key, `python -m api.seed`
+        writes images under one key and `uvicorn` reads them under another, so
+        every specimen thumbnail comes back as a 500 with no obvious cause.
+        The cached key is worth far less than a real one — it sits beside the
+        data it protects — but it is a development convenience, not a security
+        control, and production refuses to run without an explicit key.
+        """
         if self.image_encryption_key:
             return self.image_encryption_key
+
         from cryptography.fernet import Fernet
 
-        return Fernet.generate_key().decode()
+        if self.is_production:
+            raise RuntimeError(
+                "SV_IMAGE_ENCRYPTION_KEY must be set when SV_ENVIRONMENT=production. "
+                "Generate one with: python -c \"from cryptography.fernet import Fernet; "
+                'print(Fernet.generate_key().decode())"'
+            )
+
+        path = self.dev_key_path
+        if path.exists():
+            cached = path.read_text(encoding="utf-8").strip()
+            if cached:
+                return cached
+
+        key = Fernet.generate_key().decode()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(key, encoding="utf-8")
+        try:  # best effort; POSIX only, and a no-op on Windows
+            path.chmod(0o600)
+        except OSError:
+            pass
+        return key
 
 
 @lru_cache

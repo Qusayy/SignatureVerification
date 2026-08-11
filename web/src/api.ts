@@ -29,6 +29,21 @@ export interface Detection {
   method: string
 }
 
+/**
+ * One recorded step of the pipeline.
+ *
+ * Explanatory only — these are captured as the verification runs, and nothing
+ * shown here feeds back into the score.
+ */
+export interface PipelineStage {
+  key: string
+  title: string
+  caption: string
+  kind: 'image' | 'vector' | 'compare' | 'score'
+  image_url: string | null
+  metrics: Record<string, string | number | boolean | number[]>
+}
+
 export interface VerificationResult {
   event_id: string
   score: number
@@ -46,6 +61,7 @@ export interface VerificationResult {
   overlay_url: string
   page_url: string | null
   reference_urls: string[]
+  stages: PipelineStage[]
   advisory_only: true
 }
 
@@ -164,6 +180,8 @@ export interface VerifyOptions {
   file: File
   isFullPage: boolean
   bbox?: { x: number; y: number; width: number; height: number }
+  /** Capture every pipeline stage for the visual replay. Defaults to true. */
+  explain?: boolean
 }
 
 export async function verify(options: VerifyOptions): Promise<VerificationResult> {
@@ -171,6 +189,7 @@ export async function verify(options: VerifyOptions): Promise<VerificationResult
   form.append('customer_number', options.customerNumber)
   form.append('file', options.file)
   form.append('is_full_page', String(options.isFullPage))
+  form.append('explain', String(options.explain ?? true))
   if (options.bbox) {
     form.append('bbox_x', String(Math.round(options.bbox.x)))
     form.append('bbox_y', String(Math.round(options.bbox.y)))

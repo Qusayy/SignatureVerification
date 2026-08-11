@@ -23,6 +23,7 @@ from ml.preprocess.pipeline import (
     preprocess_signature,
     to_model_input,
 )
+from ml.preprocess.trace import PipelineTrace, vector_strip
 from ml.scoring.calibrate import Band, ScoreCalibrator
 from ml.scoring.compare import ComparisonScore, compare_to_references
 from ml.scoring.znorm import CohortNormalizer, CohortStats
@@ -155,8 +156,10 @@ class Verifier:
 
     # -- embedding --------------------------------------------------------
 
-    def preprocess(self, image: np.ndarray, *, strict: bool = True) -> PreprocessResult:
-        return preprocess_signature(image, strict=strict)
+    def preprocess(
+        self, image: np.ndarray, *, strict: bool = True, trace: PipelineTrace | None = None
+    ) -> PreprocessResult:
+        return preprocess_signature(image, strict=strict, trace=trace)
 
     @torch.no_grad()
     def embed_canvases(self, canvases: list[np.ndarray]) -> np.ndarray:
@@ -192,17 +195,69 @@ class Verifier:
 
     # -- verification -----------------------------------------------------
 
-    def verify(self, query_image: np.ndarray, enrolment: EnrolmentBundle) -> VerificationResult:
+    def verify(
+        self,
+        query_image: np.ndarray,
+        enrolment: EnrolmentBundle,
+        *,
+        trace: PipelineTrace | None = None,
+    ) -> VerificationResult:
         """Score a freshly captured signature against a customer's specimens.
 
         Raises :class:`~ml.preprocess.pipeline.BlankSignatureError` when the
         crop holds too little ink to score. The caller should surface that as
         "no signature detected, rescan" rather than as a low score.
+
+        Args:
+            trace: optional recorder capturing every intermediate stage for
+                display. Observational only; the result does not depend on it.
         """
-        preprocessed = self.preprocess(query_image, strict=True)
+        preprocessed = self.preprocess(query_image, strict=True, trace=trace)
+
+        if trace:
+            trace.add(
+                "model_input",
+                "Network input",
+                "The canvas is resized and centre-cropped to the exact tensor the network "
+                "was trained on. This is the last thing a human can look at; from here on "
+                "the signature is numbers.",
+                image=(to_model_input(preprocessed.image)[0] * 255).astype(np.uint8),
+                invert_for_display=True,
+                tensor=f"1x{to_model_input(preprocessed.image).shape[1]}x"
+                f"{to_model_input(preprocessed.image).shape[2]}",
+            )
+
         query_embedding = self.embed_canvases([preprocessed.image])[0]
 
+        if trace:
+            trace.add(
+                "embedding",
+                "Embedding",
+                "The network maps the signature to a point on a unit sphere. Each column "
+                "below is one dimension — amber positive, blue negative. Nothing about "
+                "identity is stored; only this vector is compared.",
+                image=vector_strip(query_embedding),
+                kind="vector",
+                dimensions=int(query_embedding.shape[0]),
+                model=self.model_version or "unversioned",
+            )
+
         comparison = compare_to_references(query_embedding, enrolment.embeddings)
+
+        if trace:
+            trace.add(
+                "compare",
+                "Compared to specimens",
+                "Cosine similarity against every specimen on file. The specimens are "
+                "combined rather than taking the single best match, so one unusually "
+                "close reference cannot carry the result.",
+                kind="compare",
+                per_reference=[round(float(v), 4) for v in comparison.per_reference],
+                combined=round(float(comparison.raw), 4),
+                best=round(float(comparison.max_similarity), 4),
+                worst=round(float(comparison.min_similarity), 4),
+                n_references=int(comparison.n_references),
+            )
 
         warnings = list(preprocessed.warnings)
         if self.cohort is not None:
@@ -219,8 +274,36 @@ class Verifier:
             normalized = comparison.raw
             warnings.append("no_cohort_normalisation")
 
+        if trace:
+            trace.add(
+                "cohort",
+                "Cohort normalisation",
+                "The raw similarity is re-expressed against how this signature scores "
+                "versus a background population of unrelated writers. A person whose "
+                "signature resembles many others is judged on a stricter scale than one "
+                "with a highly distinctive hand.",
+                kind="score",
+                raw_similarity=round(float(comparison.raw), 4),
+                normalised=round(float(normalized), 4),
+                method="S-norm" if self.cohort is not None else "none (raw passed through)",
+            )
+
         score = self.calibrator.score_0_100(normalized)
         band = self.calibrator.band(normalized, self.cfg)
+
+        if trace:
+            trace.add(
+                "calibration",
+                "Calibrated to a score",
+                "An isotonic calibration fitted on held-out signers converts the "
+                "normalised similarity into a 0-100 confidence, so the number means the "
+                "same thing for every customer. The band is advice; the decision is yours.",
+                kind="score",
+                normalised=round(float(normalized), 4),
+                score=round(float(score), 1),
+                band=band.value,
+                calibrated=not self.calibrator.is_placeholder,
+            )
 
         if self.calibrator.is_placeholder:
             warnings.append("uncalibrated_score_placeholder")

@@ -405,3 +405,121 @@ def test_image_paths_cannot_escape_the_storage_root(client, auth):
 @pytest.mark.parametrize("missing", ["images/nope.png.enc", "canvases/absent.png.enc"])
 def test_missing_images_are_404(client, auth, missing):
     assert client.get(f"/api/images/{missing}", headers=auth).status_code == 404
+
+
+# --------------------------------------------------------------------------
+# Pipeline trace
+# --------------------------------------------------------------------------
+
+
+def test_verification_returns_the_pipeline_trace(client, auth, signatures):
+    """The explanation must be the real computation, not a reconstruction."""
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:3])
+
+    body = client.post(
+        "/api/verify",
+        headers=auth,
+        data={"customer_number": "C001", "is_full_page": "false", "explain": "true"},
+        files={"file": as_upload(signatures["genuine"][3])},
+    ).json()
+
+    keys = [stage["key"] for stage in body["stages"]]
+    # The chain the operator is shown, in the order it actually runs.
+    assert keys == [
+        "capture",
+        "grayscale",
+        "illumination",
+        "binarised",
+        "lines_removed",
+        "denoised",
+        "normalised",
+        "model_input",
+        "embedding",
+        "compare",
+        "cohort",
+        "calibration",
+        "overlay",
+    ]
+    assert all(stage["title"] and stage["caption"] for stage in body["stages"])
+
+
+def test_trace_is_opt_out(client, auth, signatures):
+    """A caller that only wants the number should not pay for a dozen PNGs."""
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:3])
+
+    body = client.post(
+        "/api/verify",
+        headers=auth,
+        data={"customer_number": "C001", "is_full_page": "false", "explain": "false"},
+        files={"file": as_upload(signatures["genuine"][3])},
+    ).json()
+
+    assert body["stages"] == []
+
+
+def test_trace_does_not_change_the_score(client, auth, signatures):
+    """Tracing is observational. If it moved the score it would be a defect."""
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:3])
+
+    def score(explain: str) -> float:
+        return client.post(
+            "/api/verify",
+            headers=auth,
+            data={"customer_number": "C001", "is_full_page": "false", "explain": explain},
+            files={"file": as_upload(signatures["genuine"][3])},
+        ).json()["score"]
+
+    assert score("true") == score("false")
+
+
+def test_trace_images_are_served_through_the_encrypted_store(client, auth, signatures):
+    """Stage images are derived from a biometric image and are just as
+    identifying as the original, so they get the same protection."""
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:3])
+
+    body = client.post(
+        "/api/verify",
+        headers=auth,
+        data={"customer_number": "C001", "is_full_page": "false", "explain": "true"},
+        files={"file": as_upload(signatures["genuine"][3])},
+    ).json()
+
+    urls = [stage["image_url"] for stage in body["stages"] if stage["image_url"]]
+    assert urls, "no stage produced an image"
+
+    for url in urls:
+        assert url.startswith("/api/images/stages/")
+        assert client.get(url).status_code == 401  # no token, no image
+
+        response = client.get(url, headers=auth)
+        assert response.status_code == 200, url
+        assert response.headers["content-type"] == "image/png"
+        assert "no-store" in response.headers["cache-control"]
+
+
+def test_scoring_stages_carry_the_numbers_behind_the_result(client, auth, signatures):
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:3])
+
+    body = client.post(
+        "/api/verify",
+        headers=auth,
+        data={"customer_number": "C001", "is_full_page": "false", "explain": "true"},
+        files={"file": as_upload(signatures["genuine"][3])},
+    ).json()
+    stages = {stage["key"]: stage for stage in body["stages"]}
+
+    compare = stages["compare"]
+    assert compare["kind"] == "compare"
+    assert compare["image_url"] is None
+    assert len(compare["metrics"]["per_reference"]) == 3
+
+    calibration = stages["calibration"]
+    assert calibration["kind"] == "score"
+    # The displayed score must be the score, not a separately rounded one.
+    assert calibration["metrics"]["score"] == round(body["score"], 1)
+    assert calibration["metrics"]["band"] == body["band"]

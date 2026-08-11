@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -86,6 +86,21 @@ class ComparisonOut(BaseModel):
     single_reference: bool
 
 
+class PipelineStageOut(BaseModel):
+    """One step of the pipeline, for the visual replay.
+
+    Purely explanatory. Nothing here feeds back into the score — it is the same
+    computation, recorded as it happens.
+    """
+
+    key: str
+    title: str
+    caption: str
+    kind: Literal["image", "vector", "compare", "score"]
+    image_url: str | None = None
+    metrics: dict[str, Any] = {}
+
+
 class VerificationOut(BaseModel):
     """The advisory result shown to the employee.
 
@@ -109,6 +124,7 @@ class VerificationOut(BaseModel):
     overlay_url: str
     page_url: str | None
     reference_urls: list[str]
+    stages: list[PipelineStageOut] = []
     advisory_only: Literal[True] = True
 
 

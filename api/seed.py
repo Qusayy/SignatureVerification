@@ -23,7 +23,7 @@ import cv2
 import numpy as np
 from sqlalchemy import select
 
-from api.db import get_sessionmaker, init_db
+from api.db import get_sessionmaker, init_db, recreate_schema, schema_is_stale
 from api.models.tables import Customer, CustomerEnrolment, Employee, ReferenceSignature
 from api.security.auth import hash_password
 from api.services.inference import ModelNotLoaded, get_service
@@ -87,11 +87,18 @@ def seed_customers(
     created = 0
     summary: list[dict] = []
 
+    skipped: list[str] = []
+
     for signer in sorted(eligible)[:n_customers]:
         number = f"C{created + 1001}"
         if session.execute(
             select(Customer).where(Customer.customer_number == number)
         ).scalar_one_or_none():
+            # Keeping the existing row is the safe default — re-enrolling would
+            # discard specimens an operator may have added by hand. But it also
+            # means a re-seed after retraining changes nothing, and the stale
+            # embeddings keep producing confident, meaningless scores. So say so.
+            skipped.append(number)
             created += 1
             continue
 
@@ -152,7 +159,7 @@ def seed_customers(
         )
         created += 1
 
-    return {"customers": summary, "query_dir": str(query_dir)}
+    return {"customers": summary, "skipped_existing": skipped, "query_dir": str(query_dir)}
 
 
 def main() -> None:
@@ -168,9 +175,29 @@ def main() -> None:
     parser.add_argument("--username", default=DEMO_USERNAME)
     parser.add_argument("--password", default=DEMO_PASSWORD)
     parser.add_argument("--query-dir", type=Path, default=DATA_ROOT / "demo_queries")
+    parser.add_argument(
+        "--reset",
+        action="store_true",
+        help=(
+            "Drop every table and rebuild before seeding. Required after retraining "
+            "(stored embeddings mean nothing under a new model) and after a schema "
+            "change. Destroys all customers, specimens and audit history."
+        ),
+    )
     args = parser.parse_args()
 
-    init_db()
+    if args.reset:
+        recreate_schema()
+        print("Database rebuilt from scratch.")
+    else:
+        init_db()
+        if schema_is_stale():
+            raise SystemExit(
+                "This database predates the current code and is missing columns, so "
+                "queries against it will fail at runtime.\nRun `python -m api.doctor` "
+                "for details, or re-run this command with --reset to rebuild."
+            )
+
     manifest = Manifest.load(args.manifest)
 
     try:
@@ -196,6 +223,17 @@ def main() -> None:
         session.close()
 
     print(json.dumps(summary, indent=2))
+
+    if summary["skipped_existing"]:
+        print(
+            f"\nWARNING: {len(summary['skipped_existing'])} customer(s) already existed and "
+            f"were left untouched: {', '.join(summary['skipped_existing'])}.\n"
+            "Their stored embeddings come from whichever model enrolled them. If you have "
+            "retrained since, re-run with --reset, or re-embed in place:\n"
+            "    python -m api.reenrol --check\n"
+            "    python -m api.reenrol --apply"
+        )
+
     print(f"\nSign in as {args.username} / {args.password}")
     print(f"Demo query images: {args.query_dir.resolve()}")
     print(

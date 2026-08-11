@@ -103,9 +103,44 @@ verification is failing; check `error`.
 
 ### Common problems
 
+Before working through these, run:
+
+```bash
+python -m api.doctor
+```
+
+It checks secrets, artifacts, schema, image decryptability and embedding
+freshness in one pass, and prints the fix for anything it finds. The failures
+below are the ones it detects; the section explains what each one means.
+
+**Every authenticated request returns 500, naming a database column**
+The database predates the current code. `create_all` creates missing *tables*
+and will not add a *column* to a table that already exists, so a database
+carried over from an earlier revision keeps its old shape indefinitely. The
+error surfaces wherever that column is first selected — often on an image
+request, which is nowhere near the cause.
+
+Demo data is regenerated from the manifest, so rebuilding is free:
+
+```bash
+python -m api.seed --reset --customers 10 --references 3
+```
+
+Real data needs a migration instead; `python -m api.doctor` names the columns
+that differ. Production should be on Alembic, which this POC is not.
+
 **"Could not decrypt … the image encryption key has changed"**
 `SV_IMAGE_ENCRYPTION_KEY` differs from the one used at enrolment. Restore the
 original key. Images cannot be recovered without it.
+
+Where no key is configured, one is generated and cached at `data/.image_key`.
+That file is now the only thing standing between you and unreadable images —
+deleting it, or moving the database to another machine without it, loses every
+stored specimen. Set an explicit key anywhere that matters.
+
+This used to be far worse: with no key configured, one was generated *per
+process*, so `python -m api.seed` and `uvicorn` disagreed and every image
+request 500ed from the first run onward.
 
 **Every verification returns amber**
 Usually the calibrator, not the model. Check `calibrated` on `/api/health`. An

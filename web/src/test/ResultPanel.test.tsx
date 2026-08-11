@@ -38,6 +38,7 @@ function result(overrides: Partial<VerificationResult> = {}): VerificationResult
     overlay_url: '/api/images/overlay',
     page_url: '/api/images/page',
     reference_urls: ['/api/images/r1', '/api/images/r2', '/api/images/r3'],
+    stages: [],
     advisory_only: true,
     ...overrides,
   }

@@ -9,6 +9,7 @@ import {
   verify,
 } from '../api'
 import { AuthedImage } from '../components/AuthedImage'
+import { PipelineTheatre } from '../components/PipelineTheatre'
 import { ResultPanel } from '../components/ResultPanel'
 
 export function VerifyPage() {
@@ -193,6 +194,10 @@ export function VerifyPage() {
         </button>
         {error && <p className="alert alert--danger">{error}</p>}
       </section>
+
+      {result && result.stages.length > 0 && (
+        <PipelineTheatre stages={result.stages} runId={result.event_id} />
+      )}
 
       {result && (
         <ResultPanel

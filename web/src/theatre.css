@@ -1,0 +1,495 @@
+/* Pipeline theatre.
+ *
+ * Deliberately dark, unlike the rest of the interface. This is a viewing panel
+ * rather than a form: the surrounding chrome should recede so the signature
+ * does not compete with it. Every colour is either neutral or the same amber
+ * used to draw the detection box on the page, so the interface and the images
+ * it displays speak the same visual language.
+ */
+
+.theatre {
+  grid-column: 1 / -1;
+  background: #10151c;
+  color: #e7edf5;
+  border-radius: var(--radius);
+  padding: 1.1rem 1.25rem 1.4rem;
+  box-shadow: 0 10px 34px rgba(10, 16, 24, 0.28);
+}
+
+.theatre__head {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+  justify-content: space-between;
+}
+
+.theatre__head h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  letter-spacing: 0.01em;
+}
+
+.theatre__sub {
+  margin: 0.25rem 0 0;
+  color: #93a3b6;
+  font-size: 0.85rem;
+  max-width: 62ch;
+}
+
+.btn--ghost {
+  background: transparent;
+  border: 1px solid #35404e;
+  color: #cbd6e4;
+}
+
+.btn--ghost:hover:not(:disabled) {
+  border-color: #5a6a7d;
+  color: #fff;
+}
+
+/* ---- chapter rail ---- */
+
+.chapters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.5rem;
+  list-style: none;
+  margin: 1.1rem 0 0.9rem;
+  padding: 0;
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #64748b;
+}
+
+.chapters__item {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  transition: color 260ms ease;
+}
+
+.chapters__item.is-done {
+  color: #8fa3ba;
+}
+
+.chapters__item.is-active {
+  color: #ffb340;
+}
+
+.chapters__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.55;
+}
+
+.chapters__item.is-active .chapters__dot {
+  opacity: 1;
+  box-shadow: 0 0 0 4px rgba(255, 179, 64, 0.18);
+}
+
+/* ---- the frame ---- */
+
+.theatre__stage {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 340px;
+  background: radial-gradient(120% 90% at 50% 0%, #1b2430 0%, #0c1117 70%);
+  border: 1px solid #212c39;
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.theatre__loading {
+  color: #7e8ea3;
+  font-size: 0.9rem;
+  padding: 3rem 1rem;
+}
+
+.frame {
+  position: relative;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1rem;
+  animation: frame-in 520ms cubic-bezier(0.16, 0.9, 0.3, 1);
+}
+
+.frame__img {
+  max-width: 100%;
+  max-height: 380px;
+  object-fit: contain;
+  border-radius: 6px;
+  /* Lifts thin strokes off the dark backing without touching the pixels. */
+  box-shadow: 0 6px 26px rgba(0, 0, 0, 0.55);
+}
+
+@keyframes frame-in {
+  from {
+    opacity: 0;
+    transform: scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* One pass of light across each new frame: marks the transition without
+   obscuring the image underneath. */
+.frame__sweep {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent 38%,
+    rgba(255, 179, 64, 0.16) 48%,
+    rgba(255, 220, 170, 0.3) 50%,
+    rgba(255, 179, 64, 0.16) 52%,
+    transparent 62%
+  );
+  background-size: 260% 100%;
+  animation: sweep 900ms ease-out 1;
+}
+
+@keyframes sweep {
+  from {
+    background-position: 130% 0;
+  }
+  to {
+    background-position: -60% 0;
+  }
+}
+
+/* ---- data panels: the stages with nothing to photograph ---- */
+
+.theatre__data {
+  width: 100%;
+  max-width: 560px;
+  padding: 1rem 0;
+}
+
+.simbars {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.55rem;
+}
+
+.simbars li {
+  display: grid;
+  grid-template-columns: 7.5rem 1fr 4rem;
+  align-items: center;
+  gap: 0.7rem;
+  font-size: 0.85rem;
+}
+
+.simbars__label {
+  color: #93a3b6;
+}
+
+.simbars__track {
+  height: 9px;
+  border-radius: 999px;
+  background: #1e2833;
+  overflow: hidden;
+}
+
+.simbars__fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: #4d8fd6;
+  transition: width 620ms cubic-bezier(0.16, 0.9, 0.3, 1);
+}
+
+.simbars__fill--accent {
+  background: linear-gradient(90deg, #ffb340, #ff8a3d);
+}
+
+.simbars__value {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  color: #cbd6e4;
+}
+
+.simbars__combined {
+  padding-top: 0.55rem;
+  border-top: 1px solid #212c39;
+  font-weight: 600;
+}
+
+.bignum {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.6rem;
+}
+
+.bignum__value {
+  font-size: 4.2rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.bignum__unit {
+  color: #7e8ea3;
+  font-size: 1rem;
+}
+
+.bignum--green .bignum__value {
+  color: #4ade80;
+}
+
+.bignum--amber .bignum__value {
+  color: #ffb340;
+}
+
+.bignum--red .bignum__value {
+  color: #f87171;
+}
+
+.bignum__band {
+  margin: 0.9rem auto 0;
+  width: max-content;
+  padding: 0.25rem 0.9rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.bignum__band--green {
+  background: rgba(74, 222, 128, 0.15);
+  color: #4ade80;
+}
+
+.bignum__band--amber {
+  background: rgba(255, 179, 64, 0.15);
+  color: #ffb340;
+}
+
+.bignum__band--red {
+  background: rgba(248, 113, 113, 0.15);
+  color: #f87171;
+}
+
+.flowline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+  margin-top: 1.4rem;
+  font-variant-numeric: tabular-nums;
+  color: #cbd6e4;
+  font-size: 0.9rem;
+}
+
+.flowline__arrow {
+  position: relative;
+  width: 28px;
+  height: 1px;
+  background: linear-gradient(90deg, #35404e, #ffb340);
+}
+
+.flowline__arrow::after {
+  content: "";
+  position: absolute;
+  right: -1px;
+  top: -3px;
+  border-left: 6px solid #ffb340;
+  border-top: 3.5px solid transparent;
+  border-bottom: 3.5px solid transparent;
+}
+
+/* ---- caption ---- */
+
+.theatre__caption {
+  margin-top: 1rem;
+  min-height: 8.5rem;
+}
+
+.theatre__step {
+  font-size: 0.72rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: #ffb340;
+}
+
+.theatre__caption h3 {
+  margin: 0.3rem 0 0.35rem;
+  font-size: 1.15rem;
+}
+
+.theatre__caption p {
+  margin: 0;
+  color: #a9b8ca;
+  font-size: 0.9rem;
+  line-height: 1.55;
+  max-width: 78ch;
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+}
+
+.chips__item {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
+  background: #182029;
+  border: 1px solid #232f3d;
+  border-radius: 999px;
+  padding: 0.22rem 0.7rem;
+  font-size: 0.78rem;
+}
+
+.chips__key {
+  color: #7e8ea3;
+}
+
+.chips__value {
+  color: #e7edf5;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---- transport ---- */
+
+.theatre__transport {
+  margin-top: 1rem;
+}
+
+.scrub {
+  height: 3px;
+  border-radius: 999px;
+  background: #1e2833;
+  overflow: hidden;
+}
+
+.scrub__fill {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #4d8fd6, #ffb340);
+  transition: width 380ms ease;
+}
+
+.theatre__buttons {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.8rem;
+}
+
+.speed {
+  margin-left: auto;
+  display: flex;
+  gap: 0.2rem;
+}
+
+.speed__btn {
+  background: transparent;
+  border: 1px solid #29343f;
+  color: #93a3b6;
+  border-radius: 6px;
+  padding: 0.3rem 0.55rem;
+  font-size: 0.78rem;
+}
+
+.speed__btn.is-active {
+  border-color: #ffb340;
+  color: #ffb340;
+}
+
+/* ---- filmstrip ---- */
+
+.filmstrip {
+  display: flex;
+  gap: 0.45rem;
+  overflow-x: auto;
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0 0 0.4rem;
+}
+
+.filmstrip__cell {
+  width: 88px;
+  background: #161d26;
+  border: 1px solid #232f3d;
+  border-radius: 8px;
+  padding: 0.3rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  opacity: 0.55;
+  transition:
+    opacity 200ms ease,
+    border-color 200ms ease,
+    transform 200ms ease;
+}
+
+.filmstrip__cell.is-done {
+  opacity: 0.8;
+}
+
+.filmstrip__cell.is-active {
+  opacity: 1;
+  border-color: #ffb340;
+  transform: translateY(-2px);
+}
+
+.filmstrip__cell img {
+  width: 100%;
+  height: 44px;
+  object-fit: contain;
+  background: #0c1117;
+  border-radius: 4px;
+}
+
+.filmstrip__glyph {
+  height: 44px;
+  display: grid;
+  place-items: center;
+  background: #0c1117;
+  border-radius: 4px;
+  color: #4d8fd6;
+  font-size: 1.2rem;
+}
+
+.filmstrip__label {
+  font-size: 0.63rem;
+  line-height: 1.25;
+  color: #93a3b6;
+  text-align: left;
+}
+
+.filmstrip__cell.is-active .filmstrip__label {
+  color: #e7edf5;
+}
+
+/* Autoplay and sweeps are decoration. Anyone who has asked the system for less
+   motion still gets the full explanation, stepped through by hand. */
+@media (prefers-reduced-motion: reduce) {
+  .frame,
+  .frame__sweep {
+    animation: none;
+  }
+
+  .simbars__fill,
+  .scrub__fill,
+  .filmstrip__cell {
+    transition: none;
+  }
+}

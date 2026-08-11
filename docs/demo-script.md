@@ -58,6 +58,36 @@ Point at, in this order:
    compared against all of them, not just one.
 4. **"Advisory only — you decide"** under the gauge.
 
+## 2a. Show the working (2 min)
+
+Below the result, **How this result was reached** replays the verification one
+step at a time — the capture, the region it found, the ink separated from the
+paper, the size normalisation, the embedding, the comparison, the score. It
+plays automatically; the filmstrip along the bottom jumps to any step.
+
+This is the section that answers the question the room is actually holding:
+*how do we know it isn't guessing?* Let it play once without narrating, then
+stop on three panels:
+
+1. **Signature located** — the box it drew. Everything outside it is discarded
+   and never scored.
+2. **Size and position normalised** — the same signature written larger or
+   smaller lands in the same place. Worth stating plainly, because a customer
+   signing bigger than usual is the obvious objection and this is the answer.
+3. **Embedding** — the strip of colour. "This is what the system stores and
+   compares. It is not a picture of the signature and it cannot be turned back
+   into one."
+
+Every panel is an image this verification genuinely produced, not an
+illustration. If somebody asks whether it is a mock-up, that is the answer.
+
+Two notes if asked:
+
+- It adds roughly 50ms and a dozen small images per check. It can be turned off
+  per request, and it is not on the path to the score.
+- Those images are encrypted at rest and behind authentication, exactly like
+  the signature itself.
+
 ## 3. A skilled forgery (3 min)
 
 Upload `C1001/forgery_0.png` for the same customer.

@@ -29,6 +29,7 @@ import cv2
 import numpy as np
 
 from ml.config import PREPROCESS, PreprocessConfig
+from ml.preprocess.trace import PipelineTrace
 
 __all__ = [
     "PreprocessResult",
@@ -417,6 +418,7 @@ def preprocess_signature(
     *,
     strip_form_lines: bool = True,
     strict: bool = True,
+    trace: PipelineTrace | None = None,
 ) -> PreprocessResult:
     """Full pipeline for a cropped signature region.
 
@@ -427,6 +429,8 @@ def preprocess_signature(
             for already-clean specimen scans where there is nothing to remove.
         strict: raise :class:`BlankSignatureError` when the crop is effectively
             empty. Set False during bulk ingest to collect diagnostics instead.
+        trace: optional recorder for the intermediate image at each step. Purely
+            observational — the result is identical with or without it.
 
     Note this function does **not** rotate. Page skew must be corrected on the
     full page with :func:`deskew_page` before cropping — see module docstring.
@@ -434,12 +438,64 @@ def preprocess_signature(
     warnings: list[str] = []
 
     gray = to_grayscale(image)
+    if trace:
+        trace.add(
+            "grayscale",
+            "Grayscale",
+            "Colour carries no signature information, so it goes first. Everything "
+            "downstream reasons about ink density on paper.",
+            image=gray,
+        )
+
     flattened = normalize_illumination(gray)
+    if trace:
+        trace.add(
+            "illumination",
+            "Illumination flattened",
+            "The page background is estimated with a large morphological closing and "
+            "divided out, so a shadow across the paper is not mistaken for ink.",
+            image=flattened,
+        )
+
     binary = sauvola_binarize(flattened, cfg)
+    if trace:
+        trace.add(
+            "binarised",
+            "Adaptive threshold",
+            "Sauvola local thresholding separates ink from paper using a moving window, "
+            "which survives paper tone varying across the sheet where a single global "
+            "cut-off would not.",
+            image=binary,
+            invert_for_display=True,
+            ink_fraction=round(float(np.count_nonzero(binary)) / float(binary.size), 4),
+        )
 
     if strip_form_lines:
+        before = binary
         binary = remove_form_lines(binary, cfg)
+        if trace:
+            removed = int(np.count_nonzero(before) - np.count_nonzero(binary))
+            trace.add(
+                "lines_removed",
+                "Printed rules removed",
+                "Long thin runs spanning much of the width or height are printed form "
+                "lines, not handwriting. Strokes cut by their removal are bridged back "
+                "together.",
+                image=binary,
+                invert_for_display=True,
+                pixels_removed=max(removed, 0),
+            )
+
     binary = denoise(binary)
+    if trace:
+        trace.add(
+            "denoised",
+            "Specks dropped",
+            "Connected components far too small to belong to a stroke are discarded — "
+            "scanner dust, paper fibre, JPEG artefacts.",
+            image=binary,
+            invert_for_display=True,
+        )
 
     ink_fraction = float(np.count_nonzero(binary)) / float(binary.size)
     if ink_fraction < cfg.min_ink_fraction:
@@ -452,7 +508,23 @@ def preprocess_signature(
     if ink_fraction > 0.45:
         warnings.append("very_dark_crop_possible_background_leak")
 
+    rms_before = ink_rms_radius(binary)
     canvas, bbox = center_on_canvas(binary, cfg)
+    if trace:
+        canvas_h = cfg.canvas_size[0]
+        trace.add(
+            "normalised",
+            "Size and position normalised",
+            "The signature is rescaled until the RMS spread of its ink about the centroid "
+            "is a fixed fraction of the canvas, then centred on the centre of mass. "
+            "Absolute size stops being a feature; proportion is preserved.",
+            image=canvas,
+            invert_for_display=True,
+            ink_radius_before_px=round(rms_before, 1),
+            target_ink_radius_px=round(cfg.target_ink_rms_ratio * canvas_h, 1),
+            canvas=f"{cfg.canvas_size[1]}x{cfg.canvas_size[0]}",
+        )
+
     return PreprocessResult(
         image=canvas, ink_fraction=ink_fraction, source_bbox=bbox, warnings=warnings
     )
