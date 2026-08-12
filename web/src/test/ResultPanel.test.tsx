@@ -43,6 +43,7 @@ function result(overrides: Partial<VerificationResult> = {}): VerificationResult
     page_url: '/api/images/page',
     reference_urls: ['/api/images/r1', '/api/images/r2', '/api/images/r3'],
     stages: [],
+    diagnostics: null,
     advisory_only: true,
     ...overrides,
   }
@@ -189,5 +190,78 @@ describe('single specimen', () => {
       <ResultPanel result={oneSpecimen()} onDecision={vi.fn()} submitting={false} decided={null} />,
     )
     expect(screen.getByText(/own consistency cannot be measured/i)).toBeInTheDocument()
+  })
+})
+
+describe('score breakdown', () => {
+  const diagnostics = (over = {}) => ({
+    combined_similarity: 0.81,
+    baseline: 0.72,
+    baseline_source: 'own',
+    similarity_floor: 0.6,
+    floor_measured: true,
+    relative_margin: 0.09,
+    absolute_margin: 0.21,
+    binding_term: 'relative margin',
+    normalised: 0.09,
+    calibrator_domain: [-0.7, 0.15] as [number, number],
+    calibrator_clamped: null,
+    calibrator_distinct_scores: 42,
+    calibrator_fit_samples: [500, 500] as [number, number],
+    model_version: 'signet@abc123',
+    inconsistent: false,
+    ...over,
+  })
+
+  it('shows the arithmetic behind the score', () => {
+    render(
+      <ResultPanel
+        result={result({ diagnostics: diagnostics() })}
+        onDecision={vi.fn()}
+        submitting={false}
+        decided={null}
+      />,
+    )
+    expect(screen.getByText('Score breakdown')).toBeInTheDocument()
+    expect(screen.getByText('Baseline subtracted')).toBeInTheDocument()
+    expect(screen.getByText(/the relative margin/)).toBeInTheDocument()
+  })
+
+  it('shouts when a low similarity produced a confident score', () => {
+    render(
+      <ResultPanel
+        result={result({ diagnostics: diagnostics({ inconsistent: true, combined_similarity: 0.09 }) })}
+        onDecision={vi.fn()}
+        submitting={false}
+        decided={null}
+      />,
+    )
+    expect(screen.getByText(/not trustworthy/i)).toBeInTheDocument()
+    expect(screen.getByText(/Do not act on it/i)).toBeInTheDocument()
+  })
+
+  it('explains saturation when the calibrator clamped the value', () => {
+    render(
+      <ResultPanel
+        result={result({ diagnostics: diagnostics({ calibrator_clamped: 'above', normalised: 0.9 }) })}
+        onDecision={vi.fn()}
+        submitting={false}
+        decided={null}
+      />,
+    )
+    expect(screen.getByText(/clamped to the/i)).toBeInTheDocument()
+    expect(screen.getByText(/cannot\s+distinguish one signature from another/i)).toBeInTheDocument()
+  })
+
+  it('flags a thin calibration fit', () => {
+    render(
+      <ResultPanel
+        result={result({ diagnostics: diagnostics({ calibrator_fit_samples: [72, 96] }) })}
+        onDecision={vi.fn()}
+        submitting={false}
+        decided={null}
+      />,
+    )
+    expect(screen.getByText(/thin fit/i)).toBeInTheDocument()
   })
 })

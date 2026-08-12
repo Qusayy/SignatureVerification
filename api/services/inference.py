@@ -47,6 +47,7 @@ class PipelineOutput:
     overlay: np.ndarray
     reason: str
     stages: list[Stage] = field(default_factory=list)
+    diagnostics: dict = field(default_factory=dict)
 
 
 def _annotate_detection(page: np.ndarray, detection: Detection) -> np.ndarray:
@@ -322,6 +323,7 @@ class InferenceService:
             overlay=overlay,
             reason=reason_text(result),
             stages=trace.stages,
+            diagnostics=verifier.score_diagnostics(result),
         )
 
     @staticmethod

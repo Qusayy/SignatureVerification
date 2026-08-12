@@ -100,6 +100,32 @@ class ComparisonOut(BaseModel):
     specimens_disagree: bool = False
 
 
+class ScoreDiagnosticsOut(BaseModel):
+    """The arithmetic between the similarity and the number on screen.
+
+    Shown in the interface rather than hidden behind a CLI, because the people
+    who hit a surprising score are looking at a browser. `inconsistent` is the
+    one field to react to: it means a similarity no genuine signature reaches
+    produced a confident score, and nothing else on the panel can be trusted.
+    """
+
+    combined_similarity: float
+    baseline: float
+    baseline_source: str
+    similarity_floor: float
+    floor_measured: bool
+    relative_margin: float
+    absolute_margin: float
+    binding_term: str
+    normalised: float
+    calibrator_domain: list[float]
+    calibrator_clamped: str | None = None
+    calibrator_distinct_scores: int
+    calibrator_fit_samples: list[int]
+    model_version: str = ""
+    inconsistent: bool = False
+
+
 class PipelineStageOut(BaseModel):
     """One step of the pipeline, for the visual replay.
 
@@ -139,6 +165,7 @@ class VerificationOut(BaseModel):
     page_url: str | None
     reference_urls: list[str]
     stages: list[PipelineStageOut] = []
+    diagnostics: ScoreDiagnosticsOut | None = None
     advisory_only: Literal[True] = True
 
 

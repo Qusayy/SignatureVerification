@@ -61,6 +61,31 @@ export interface PipelineStage {
   metrics: Record<string, string | number | boolean | number[]>
 }
 
+/**
+ * The arithmetic between the similarity and the number on screen.
+ *
+ * `inconsistent` is the field to react to: it means a similarity no genuine
+ * signature reaches produced a confident score, and nothing else on the panel
+ * can be trusted.
+ */
+export interface ScoreDiagnostics {
+  combined_similarity: number
+  baseline: number
+  baseline_source: string
+  similarity_floor: number
+  floor_measured: boolean
+  relative_margin: number
+  absolute_margin: number
+  binding_term: string
+  normalised: number
+  calibrator_domain: [number, number]
+  calibrator_clamped: 'below' | 'above' | null
+  calibrator_distinct_scores: number
+  calibrator_fit_samples: [number, number]
+  model_version: string
+  inconsistent: boolean
+}
+
 export interface VerificationResult {
   event_id: string
   score: number
@@ -79,6 +104,7 @@ export interface VerificationResult {
   page_url: string | null
   reference_urls: string[]
   stages: PipelineStage[]
+  diagnostics: ScoreDiagnostics | null
   advisory_only: true
 }
 

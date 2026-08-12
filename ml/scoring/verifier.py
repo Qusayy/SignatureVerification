@@ -429,6 +429,53 @@ class Verifier:
             model_version=self.model_version,
         )
 
+    def score_diagnostics(self, result: VerificationResult) -> dict:
+        """Everything between the similarity and the number on screen.
+
+        Exists because "why did a 9% match score 90?" is not answerable from
+        the result alone, and the people who hit it are looking at a browser,
+        not a terminal. Every quantity here is one that can be checked against
+        the arithmetic shown beside it.
+        """
+        calibrator = self.calibrator
+        comparison = result.comparison
+        combined = comparison.raw + comparison.intra_reference_mean
+
+        floor = calibrator.genuine_similarity_floor or self.cfg.absolute_similarity_floor
+        relative = combined - comparison.intra_reference_mean
+        absolute = combined - floor
+
+        domain_low = float(calibrator.x.min())
+        domain_high = float(calibrator.x.max())
+        clamped = None
+        if result.normalized_score < domain_low:
+            clamped = "below"
+        elif result.normalized_score > domain_high:
+            clamped = "above"
+
+        # The check that matters: a similarity no genuine signature reaches
+        # must not produce a confident score. If this trips, the score is not
+        # to be trusted whatever else the panel says.
+        inconsistent = combined < floor and result.score >= 50.0
+
+        return {
+            "combined_similarity": round(combined, 5),
+            "baseline": round(comparison.intra_reference_mean, 5),
+            "baseline_source": comparison.baseline_source,
+            "similarity_floor": round(float(floor), 5),
+            "floor_measured": bool(calibrator.genuine_similarity_floor),
+            "relative_margin": round(relative, 5),
+            "absolute_margin": round(absolute, 5),
+            "binding_term": "absolute floor" if absolute < relative else "relative margin",
+            "normalised": round(result.normalized_score, 5),
+            "calibrator_domain": [round(domain_low, 5), round(domain_high, 5)],
+            "calibrator_clamped": clamped,
+            "calibrator_distinct_scores": len({round(float(v) * 100, 1) for v in calibrator.y}),
+            "calibrator_fit_samples": [calibrator.n_fit_genuine, calibrator.n_fit_impostor],
+            "model_version": self.model_version,
+            "inconsistent": inconsistent,
+        }
+
     def _is_suspected_copy(
         self, query_canvas: np.ndarray, enrolment: EnrolmentBundle, score: float
     ) -> bool:

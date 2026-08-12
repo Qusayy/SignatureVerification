@@ -498,3 +498,89 @@
     transition: none;
   }
 }
+
+/* ---- score breakdown ----
+ * The arithmetic behind the number. Collapsed by default: an operator at a
+ * counter does not need it, and the person debugging a surprising score needs
+ * every line of it.
+ */
+
+.breakdown {
+  margin-top: 1rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--bg-raise);
+}
+
+.breakdown > summary {
+  cursor: pointer;
+  padding: 0.55rem 0.85rem;
+  font-size: 0.8rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  user-select: none;
+}
+
+.breakdown > summary:hover {
+  color: var(--ink);
+}
+
+.breakdown[open] > summary {
+  border-bottom: 1px solid var(--line);
+}
+
+.breakdown__rows {
+  margin: 0;
+  padding: 0.6rem 0.85rem;
+  display: grid;
+  gap: 0.1rem;
+  font-size: 0.85rem;
+}
+
+.breakdown__rows > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 1rem;
+  align-items: baseline;
+  padding: 0.35rem 0.5rem;
+  border-radius: 6px;
+}
+
+/* The step that actually decided the outcome. */
+.breakdown__rows > div.is-binding {
+  background: rgba(255, 179, 64, 0.1);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.breakdown__rows dt {
+  color: var(--muted);
+}
+
+.breakdown__rows dd {
+  margin: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.breakdown__note {
+  display: block;
+  font-weight: 400;
+  font-size: 0.74rem;
+  color: var(--dim);
+  margin-top: 0.1rem;
+}
+
+.breakdown__footer {
+  margin: 0;
+  padding: 0.6rem 0.85rem 0.75rem;
+  border-top: 1px solid var(--line-soft);
+  font-size: 0.76rem;
+  line-height: 1.5;
+  color: var(--dim);
+}
+
+.breakdown .alert {
+  margin: 0.6rem 0.85rem;
+}

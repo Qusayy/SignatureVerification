@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { VerificationResult } from '../api'
 import { AuthedImage } from './AuthedImage'
+import { ScoreBreakdown } from './ScoreBreakdown'
 import { ScoreGauge } from './ScoreGauge'
 
 interface Props {
@@ -131,6 +132,8 @@ export function ResultPanel({ result, onDecision, submitting, decided }: Props) 
               )}
             </p>
           )}
+
+          {result.diagnostics && <ScoreBreakdown diagnostics={result.diagnostics} />}
         </div>
       </div>
 

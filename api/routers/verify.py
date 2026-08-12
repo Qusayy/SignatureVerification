@@ -28,6 +28,7 @@ from api.schemas import (
     DecisionOut,
     DetectionOut,
     PipelineStageOut,
+    ScoreDiagnosticsOut,
     VerificationOut,
 )
 from api.security.auth import current_employee
@@ -219,6 +220,9 @@ async def verify_signature(
         page_url=f"/api/images/{page_key}" if page_key else None,
         reference_urls=[f"/api/images/{r.canvas_key}?invert=1" for r in customer.references],
         stages=stages,
+        diagnostics=ScoreDiagnosticsOut(**output.diagnostics)
+        if output.diagnostics
+        else None,
     )
 
 
