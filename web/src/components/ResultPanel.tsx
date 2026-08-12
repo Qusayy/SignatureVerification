@@ -15,9 +15,13 @@ const WARNING_TEXT: Record<string, string> = {
     'Only one specimen signature is on file for this customer, so confidence is lower than usual.',
   uncalibrated_score_placeholder:
     'This model has not been calibrated. The number shown is indicative only, not a confidence.',
+  score_uses_population_baseline:
+    'Only one specimen is on file, so this customer’s own consistency cannot be measured. ' +
+    'The score is judged against a typical customer instead, which makes it less reliable ' +
+    'than it would be with two or three specimens.',
   score_not_writer_normalised:
-    'Only one specimen is on file, so there is no way to measure how consistently this ' +
-    'customer signs. This score is less comparable with other customers than usual.',
+    'This score has no per-customer baseline and is not comparable with other customers. ' +
+    'Treat it as indicative only.',
   ink_outside_detected_region:
     'Some handwriting fell outside the detected region. Check the located area, and draw ' +
     'the box manually if part of the signature was cut off.',
@@ -35,11 +39,12 @@ const WARNING_TEXT: Record<string, string> = {
  * specimens and how well the specimens match each other — not by the raw
  * similarity, which is what an operator's eye goes to first.
  */
-function describeMargin(margin: number): string {
-  if (margin >= 0.02) return 'Comfortably within this customer’s normal variation.'
-  if (margin >= 0) return 'About as consistent as this customer’s own specimens are.'
-  if (margin >= -0.02) return 'Slightly outside this customer’s normal variation — worth a look.'
-  return 'Noticeably less consistent than this customer’s own specimens.'
+function describeMargin(margin: number, source: string): string {
+  const whose = source === 'own' ? 'this customer’s' : 'the typical'
+  if (margin >= 0.02) return `Comfortably within ${whose} normal variation.`
+  if (margin >= 0) return `About as consistent as ${whose} own signatures are.`
+  if (margin >= -0.02) return `Slightly outside ${whose} normal variation — worth a look.`
+  return `Noticeably less consistent than ${whose} own signatures.`
 }
 
 export function ResultPanel({ result, onDecision, submitting, decided }: Props) {
@@ -82,9 +87,13 @@ export function ResultPanel({ result, onDecision, submitting, decided }: Props) 
               <dt>Average across specimens</dt>
               <dd>{(result.comparison.mean_similarity * 100).toFixed(1)}%</dd>
             </div>
-            {result.comparison.writer_normalised && (
+            {result.comparison.baseline_source !== 'none' && (
               <div>
-                <dt>Specimens agree with each other</dt>
+                <dt>
+                  {result.comparison.baseline_source === 'own'
+                    ? 'Specimens agree with each other'
+                    : 'Typical customer consistency'}
+                </dt>
                 <dd>{(result.comparison.intra_reference_mean * 100).toFixed(1)}%</dd>
               </div>
             )}
@@ -101,18 +110,22 @@ export function ResultPanel({ result, onDecision, submitting, decided }: Props) 
             The comparison is the point, so state it in words rather than
             leaving the operator to subtract.
           */}
-          {result.comparison.writer_normalised && (
+          {result.comparison.baseline_source !== 'none' && (
             <p className="result__reason">
               This signature matches{' '}
               <strong>
                 {(result.comparison.mean_similarity * 100).toFixed(1)}%
               </strong>{' '}
-              on average, against stored specimens that match each other{' '}
+              on average, against a baseline of{' '}
               <strong>
                 {(result.comparison.intra_reference_mean * 100).toFixed(1)}%
-              </strong>
-              . {describeMargin(
+              </strong>{' '}
+              {result.comparison.baseline_source === 'own'
+                ? '— how well this customer’s own specimens match each other.'
+                : '— typical for a customer, since only one specimen is on file.'}{' '}
+              {describeMargin(
                 result.comparison.mean_similarity - result.comparison.intra_reference_mean,
+                result.comparison.baseline_source,
               )}
             </p>
           )}

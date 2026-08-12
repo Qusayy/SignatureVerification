@@ -27,9 +27,15 @@ export interface Comparison {
   per_reference: number[]
   n_references: number
   single_reference: boolean
-  /** Mean pairwise similarity among the customer's own specimens. */
+  /** The baseline subtracted from the similarity to produce `raw`. */
   intra_reference_mean: number
   writer_normalised: boolean
+  /**
+   * Where that baseline came from. `population` means the customer has one
+   * specimen, so their own consistency could not be measured and a corpus
+   * median stood in — a weaker basis, and it must be shown as such.
+   */
+  baseline_source: 'own' | 'population' | 'none'
 }
 
 export interface Detection {

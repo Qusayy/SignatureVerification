@@ -131,6 +131,7 @@ def build_comparisons(
     *,
     max_references: int | None = None,
     writer_normalise: bool = SCORING.writer_normalise,
+    population_mean: float | None = None,
     seed: int = 1337,
 ) -> tuple[dict[str, ComparisonSet], dict]:
     """Form every genuine / skilled / random comparison in a split.
@@ -184,12 +185,20 @@ def build_comparisons(
     # Precomputed once per writer, as production does at enrolment.
     reference_means = {w: intra_reference_mean(r) for w, r in references.items()}
 
+    # The substitute for writers whose specimen agreement is unmeasurable
+    # (one specimen). Must be the value production will use, or the reported
+    # single-specimen numbers describe a different system.
+    measurable = [v for v in reference_means.values() if v > 0.0]
+    if population_mean is None:
+        population_mean = float(np.median(measurable)) if measurable else 0.0
+
     def score(query_index: int, writer: str) -> float:
         raw = compare_to_references(
             embeddings[query_index],
             references[writer],
             writer_normalise=writer_normalise,
             reference_mean=reference_means[writer],
+            population_reference_mean=population_mean,
         ).raw
         if cohort is None:
             return raw
@@ -223,6 +232,7 @@ def build_comparisons(
 
     summary = {
         "writers_evaluated": len(eligible),
+        "population_reference_mean": round(population_mean, 5),
         "references_per_writer": {
             w: int(references[w].shape[0]) for w in list(eligible)[:5]
         },
@@ -485,7 +495,7 @@ def evaluate(args: argparse.Namespace) -> Path:
         val_embeddings, val_records = embed_records(
             model, manifest, "val", device, cache_dir=args.cache_dir
         )
-        val_populations, _ = build_comparisons(
+        val_populations, val_summary = build_comparisons(
             val_embeddings, val_records, scoring_cohort, seed=args.seed
         )
         val_overall = val_populations["overall"]
@@ -495,6 +505,8 @@ def evaluate(args: argparse.Namespace) -> Path:
                 val_overall.skilled_forgery,
                 fitted_on="val",
                 weights_id=model_id,
+                # Carried with the curve because it is part of the same scale.
+                population_reference_mean=val_summary["population_reference_mean"],
             )
             calibrator.save(ARTIFACT_ROOT / "calibrator.json")
 
@@ -514,8 +526,18 @@ def evaluate(args: argparse.Namespace) -> Path:
 
     single_ref = None
     if args.single_reference_comparison:
+        # Capping at one specimen makes every writer's own agreement
+        # unmeasurable, so the population median must come from the full run.
+        # Recomputing it here would give 0 and put this whole condition on a
+        # different score scale from the one being compared against — which is
+        # exactly the failure this comparison exists to measure.
         single_ref, _ = build_comparisons(
-            embeddings, records, scoring_cohort, max_references=1, seed=args.seed
+            embeddings,
+            records,
+            scoring_cohort,
+            max_references=1,
+            population_mean=summary["population_reference_mean"],
+            seed=args.seed,
         )
 
     sources = {r.source for r in records}

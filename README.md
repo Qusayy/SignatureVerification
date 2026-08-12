@@ -217,6 +217,32 @@ advisory and bands uncertain cases amber rather than auto-accepting — but
 **neither recipe supports a high-precision auto-accept threshold**, and a
 deployment that wanted one would need to re-take this decision.
 
+### How many specimens per customer
+
+Most deployments start with exactly one signature on file. That case is worth
+costing, because it is not free:
+
+| Specimens on file | EER | 95% CI | AUC | TAR @ FAR 1% |
+|---|---|---|---|---|
+| all available (~5) | 20.10% | 18.4–21.4 | 0.878 | 4.90% |
+| **exactly one** | **27.58%** | 25.6–29.1 | 0.803 | 8.90% |
+
+**7.5 EER points.** Collecting a second and third specimen at the next branch
+visit is the cheapest accuracy improvement available — no retraining, no
+infrastructure.
+
+With one specimen the system cannot measure how consistently that customer
+signs, so it substitutes the corpus median and says so: the response carries
+`baseline_source: "population"` and a `score_uses_population_baseline`
+warning, and the interface labels the figure "typical customer consistency"
+rather than presenting it as a measurement of that person.
+
+To demo the single-specimen case as it will actually behave:
+
+```bash
+python -m api.seed --reset --references 1 --customers 10
+```
+
 **Two numbers, always reported separately.** Skilled-forgery EER (someone
 practising your signature) and random-impostor EER (a stranger signing your
 name) differ by orders of magnitude — currently 20.1% versus 0.0% on this

@@ -93,6 +93,10 @@ class ComparisonOut(BaseModel):
     # explain why an 89% match scored 50, and the panel reads as broken.
     intra_reference_mean: float = 0.0
     writer_normalised: bool = False
+    # "own" | "population" | "none" — which baseline produced `raw`. A client
+    # must not present a population baseline as though it measured this
+    # customer.
+    baseline_source: str = "none"
 
 
 class PipelineStageOut(BaseModel):

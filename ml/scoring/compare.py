@@ -66,10 +66,14 @@ class ComparisonScore:
     min_similarity: float
     per_reference: list[float]
     n_references: int
-    # Mean pairwise similarity among the customer's own specimens, subtracted
-    # from `raw` when available. 0.0 means it was not applied — either one
-    # specimen on file, or a caller that did not supply it.
+    # The baseline subtracted from the combined similarity to produce `raw`.
     intra_reference_mean: float = 0.0
+    # Where that baseline came from:
+    #   "own"        - this customer's specimens agree with each other this well
+    #   "population" - only one specimen on file, so the corpus median is used
+    #   "none"       - no baseline available; `raw` is a bare similarity and is
+    #                  NOT on the scale the calibrator was fitted for
+    baseline_source: str = "none"
 
     @property
     def is_single_reference(self) -> bool:
@@ -77,7 +81,7 @@ class ComparisonScore:
 
     @property
     def is_writer_normalised(self) -> bool:
-        return self.intra_reference_mean != 0.0
+        return self.baseline_source == "own"
 
     def to_dict(self) -> dict:
         return {
@@ -90,6 +94,7 @@ class ComparisonScore:
             "single_reference": self.is_single_reference,
             "intra_reference_mean": round(self.intra_reference_mean, 5),
             "writer_normalised": self.is_writer_normalised,
+            "baseline_source": self.baseline_source,
         }
 
 
@@ -119,6 +124,7 @@ def compare_to_references(
     max_weight: float = DEFAULT_MAX_WEIGHT,
     writer_normalise: bool = True,
     reference_mean: float | None = None,
+    population_reference_mean: float = 0.0,
 ) -> ComparisonScore:
     """Score one query embedding against a customer's reference embeddings.
 
@@ -131,11 +137,23 @@ def compare_to_references(
             is where most of the accuracy lives.
         reference_mean: precomputed :func:`intra_reference_mean`. Pass it in
             production; it only changes when the specimen set changes.
+        population_reference_mean: the corpus-wide median specimen agreement,
+            used when a customer has only one specimen on file and their own
+            consistency therefore cannot be measured.
 
     Returns cosine similarities in [-1, 1]; the combined ``raw`` is shifted by
-    the intra-reference mean when writer normalisation applies, so it can go
-    slightly negative for a query less consistent with the specimens than they
-    are with each other. That is meaningful, not a bug.
+    the baseline, so it can go slightly negative for a query less consistent
+    with the specimens than they are with each other. That is meaningful, not a
+    bug.
+
+    **The single-specimen case is why ``population_reference_mean`` exists.**
+    Subtracting nothing leaves ``raw`` as a bare similarity around 0.8-1.0,
+    while the calibrator is fitted on margins around zero. Everything then
+    clips to the top of the curve and *every* verification returns ~100,
+    forgeries included. Falling back to the population median keeps
+    single-specimen customers on the scale the calibrator was fitted for. It is
+    an approximation — the customer's real consistency is unknown — and it is
+    labelled ``baseline_source="population"`` so callers can say so.
     """
     q = l2_normalize(np.asarray(query).reshape(1, -1))[0]
     refs = l2_normalize(references)
@@ -151,8 +169,17 @@ def compare_to_references(
     raw = max_weight * max_sim + (1.0 - max_weight) * mean_sim
 
     mu_ref = 0.0
+    source = "none"
     if writer_normalise:
-        mu_ref = reference_mean if reference_mean is not None else intra_reference_mean(refs)
+        # Decided by how many specimens there are, not by the sign of the
+        # value. A customer whose two specimens barely resemble each other has
+        # an agreement near zero — or below it — and that is a real measurement
+        # about a real customer, not a missing one.
+        if refs.shape[0] >= 2:
+            mu_ref = reference_mean if reference_mean is not None else intra_reference_mean(refs)
+            source = "own"
+        elif population_reference_mean:
+            mu_ref, source = population_reference_mean, "population"
         raw -= mu_ref
 
     return ComparisonScore(
@@ -163,4 +190,5 @@ def compare_to_references(
         per_reference=[float(s) for s in similarities],
         n_references=int(refs.shape[0]),
         intra_reference_mean=mu_ref,
+        baseline_source=source,
     )

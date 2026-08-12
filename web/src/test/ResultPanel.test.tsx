@@ -25,6 +25,7 @@ function result(overrides: Partial<VerificationResult> = {}): VerificationResult
       single_reference: false,
       intra_reference_mean: 0.72,
       writer_normalised: true,
+      baseline_source: 'own' as const,
     },
     detection: {
       bbox: { x: 10, y: 20, width: 300, height: 90 },
@@ -147,6 +148,7 @@ describe('specimen agreement', () => {
             n_references: 1,
             single_reference: true,
             writer_normalised: false,
+            baseline_source: 'none' as const,
             intra_reference_mean: 0,
           },
         })}
@@ -156,5 +158,35 @@ describe('specimen agreement', () => {
       />,
     )
     expect(screen.queryByText('Specimens agree with each other')).not.toBeInTheDocument()
+  })
+})
+
+describe('single specimen', () => {
+  const oneSpecimen = () =>
+    result({
+      warnings: ['score_uses_population_baseline'],
+      comparison: {
+        ...result().comparison,
+        n_references: 1,
+        single_reference: true,
+        writer_normalised: false,
+        baseline_source: 'population' as const,
+        intra_reference_mean: 0.9575,
+      },
+    })
+
+  it('labels a population baseline as not being this customer', () => {
+    render(
+      <ResultPanel result={oneSpecimen()} onDecision={vi.fn()} submitting={false} decided={null} />,
+    )
+    expect(screen.getByText('Typical customer consistency')).toBeInTheDocument()
+    expect(screen.queryByText('Specimens agree with each other')).not.toBeInTheDocument()
+  })
+
+  it('warns that the score rests on a weaker basis', () => {
+    render(
+      <ResultPanel result={oneSpecimen()} onDecision={vi.fn()} submitting={false} decided={null} />,
+    )
+    expect(screen.getByText(/own consistency cannot be measured/i)).toBeInTheDocument()
   })
 })

@@ -300,6 +300,10 @@ class Verifier:
             enrolment.embeddings,
             writer_normalise=self.cfg.writer_normalise,
             reference_mean=enrolment.resolved_reference_mean(),
+            # Substitute for customers with a single specimen, whose own
+            # consistency cannot be measured. Without it their score is a bare
+            # similarity fed into a curve fitted on margins, and clips to 100.
+            population_reference_mean=self.calibrator.population_reference_mean,
         )
 
         if trace:
@@ -334,8 +338,12 @@ class Verifier:
             # consistency. Where it did not — a single specimen on file — it is
             # not, and that case is warned about below.
             normalized = comparison.raw
-        if not comparison.is_writer_normalised and self.cfg.writer_normalise:
-            warnings.append("score_not_writer_normalised")
+        if self.cfg.writer_normalise and comparison.baseline_source != "own":
+            warnings.append(
+                "score_uses_population_baseline"
+                if comparison.baseline_source == "population"
+                else "score_not_writer_normalised"
+            )
 
         if trace:
             if comparison.is_writer_normalised:

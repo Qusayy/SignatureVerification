@@ -75,6 +75,13 @@ class ScoreCalibrator:
     # applied to a different model maps the wrong z-scores onto confidence,
     # which is how two thirds of skilled forgeries came to print 99.5.
     weights_id: str = ""
+    # Corpus median of per-customer specimen agreement. Lives here because it
+    # is part of the score *scale* this curve was fitted for: a customer with
+    # one specimen has no measurable consistency of their own, and without this
+    # substitute their score is a bare similarity of ~0.9 fed into a curve whose
+    # domain ends near 0.04 — so it clips to the ceiling and every single
+    # specimen customer scores ~100, forgeries included.
+    population_reference_mean: float = 0.0
 
     # -- fitting ----------------------------------------------------------
 
@@ -86,6 +93,7 @@ class ScoreCalibrator:
         *,
         fitted_on: str = "",
         weights_id: str = "",
+        population_reference_mean: float = 0.0,
         clip: tuple[float, float] = (0.005, 0.995),
         min_samples: int = 10,
     ) -> ScoreCalibrator:
@@ -147,6 +155,7 @@ class ScoreCalibrator:
             n_fit_impostor=len(i),
             fitted_on=fitted_on,
             weights_id=weights_id,
+            population_reference_mean=population_reference_mean,
         )
 
     # -- application ------------------------------------------------------
@@ -181,6 +190,7 @@ class ScoreCalibrator:
                     "n_fit_impostor": self.n_fit_impostor,
                     "fitted_on": self.fitted_on,
                     "weights_id": self.weights_id,
+                    "population_reference_mean": self.population_reference_mean,
                 },
                 indent=2,
             )
@@ -197,6 +207,7 @@ class ScoreCalibrator:
             n_fit_impostor=payload.get("n_fit_impostor", 0),
             fitted_on=payload.get("fitted_on", ""),
             weights_id=payload.get("weights_id", ""),
+            population_reference_mean=payload.get("population_reference_mean", 0.0),
         )
 
     @classmethod

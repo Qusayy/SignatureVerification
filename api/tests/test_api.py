@@ -555,7 +555,14 @@ def test_comparison_reports_the_baseline_the_score_is_measured_against(
     )
 
 
-def test_single_specimen_reports_no_baseline(client, auth, signatures):
+def test_single_specimen_falls_back_to_the_population_baseline(client, auth, signatures):
+    """The configuration most deployments are actually in.
+
+    One specimen means the customer's own consistency cannot be measured. With
+    no substitute, `raw` came through as a bare similarity of ~0.9 into a
+    calibrator whose domain ends near +0.04, so it clipped to the ceiling and
+    *every* single-specimen verification returned ~100 — forgeries included.
+    """
     _create_customer(client, auth)
     _enrol(client, auth, "C001", signatures["genuine"][:1])
 
@@ -566,6 +573,33 @@ def test_single_specimen_reports_no_baseline(client, auth, signatures):
         files={"file": as_upload(signatures["genuine"][3])},
     ).json()
 
-    assert body["comparison"]["writer_normalised"] is False
-    assert body["comparison"]["intra_reference_mean"] == 0.0
-    assert "score_not_writer_normalised" in body["warnings"]
+    comparison = body["comparison"]
+    assert comparison["baseline_source"] == "population"
+    assert comparison["writer_normalised"] is False, "a population median is not this customer"
+    assert comparison["intra_reference_mean"] > 0.5
+    # The margin, not the similarity: well inside the calibrated range.
+    assert comparison["raw"] < 0.5
+    assert "score_uses_population_baseline" in body["warnings"]
+
+
+def test_a_poor_single_specimen_match_does_not_score_full_marks(client, auth, signatures):
+    """The regression, stated as the operator would see it."""
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
+
+    def score(image) -> float:
+        return client.post(
+            "/api/verify",
+            headers=auth,
+            data={"customer_number": "C001", "is_full_page": "false"},
+            files={"file": as_upload(image)},
+        ).json()["score"]
+
+    genuine = score(signatures["genuine"][3])
+    stranger = score(signatures["other_writer"])
+
+    assert not (genuine >= 99 and stranger >= 99), (
+        "a genuine signature and a different writer's both scored full marks against a "
+        "single specimen — the score is saturated, not discriminating"
+    )
+    assert stranger < genuine
