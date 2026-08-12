@@ -79,6 +79,11 @@ class ComparisonScore:
     # The stored specimens do not resemble each other. A broken enrolment, not
     # a customer who is easy to match.
     specimens_disagree: bool = False
+    # Whether the absolute floor actually decided `raw`, as opposed to merely
+    # being available. Recorded because a diagnostic that reports which term
+    # *would* bind rather than which one *did* is worse than none: it sent an
+    # investigation in the wrong direction once already.
+    floor_applied: bool = False
 
     @property
     def is_single_reference(self) -> bool:
@@ -214,13 +219,28 @@ def compare_to_references(
     # Only when a baseline was actually subtracted. Without one `raw` is a bare
     # similarity on a different scale entirely, and shifting it would corrupt
     # the plain-similarity mode the benchmark uses for comparison.
-    if source != "none":
+    # Applied whenever normalisation is on at all — including, especially, when
+    # no baseline could be established.
+    #
+    # This used to be skipped when `source == "none"`, which was exactly
+    # backwards. A customer with one specimen and a calibrator carrying no
+    # population baseline got no baseline *and* no floor, so `raw` came through
+    # as a bare similarity: a 4.7% match scored 69/100. The case with the least
+    # information is the case that most needs the backstop.
+    #
+    # `writer_normalise=False` is the one exemption, because that caller has
+    # explicitly asked for the plain similarity — the benchmark uses it to
+    # compare recipes.
+    floor_applied = False
+    if writer_normalise:
         floor = (
             similarity_floor
             if similarity_floor is not None and similarity_floor > 0.0
             else cfg.absolute_similarity_floor
         )
-        raw = min(raw, combined - floor)
+        capped = combined - floor
+        floor_applied = capped < raw
+        raw = min(raw, capped)
 
     return ComparisonScore(
         raw=raw,
@@ -232,4 +252,5 @@ def compare_to_references(
         intra_reference_mean=mu_ref,
         baseline_source=source,
         specimens_disagree=specimens_disagree,
+        floor_applied=floor_applied,
     )

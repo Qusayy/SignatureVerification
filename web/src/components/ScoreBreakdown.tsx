@@ -52,11 +52,11 @@ export function ScoreBreakdown({ diagnostics: d }: { diagnostics: ScoreDiagnosti
               <span className="breakdown__note">{baselineLabel(d.baseline_source)}</span>
             </dd>
           </div>
-          <div className={d.binding_term === 'relative margin' ? 'is-binding' : ''}>
+          <div className={!d.floor_applied && d.baseline_source !== 'none' ? 'is-binding' : ''}>
             <dt>Margin against that baseline</dt>
             <dd>{signed(d.relative_margin)}</dd>
           </div>
-          <div className={d.binding_term === 'absolute floor' ? 'is-binding' : ''}>
+          <div className={d.floor_applied ? 'is-binding' : ''}>
             <dt>Margin against the floor</dt>
             <dd>
               {signed(d.absolute_margin)}
@@ -69,8 +69,12 @@ export function ScoreBreakdown({ diagnostics: d }: { diagnostics: ScoreDiagnosti
           <div>
             <dt>Score is decided by</dt>
             <dd>
-              the {d.binding_term}
-              <span className="breakdown__note">whichever of the two is stricter</span>
+              {d.binding_term}
+              <span className="breakdown__note">
+                {d.baseline_source === 'none'
+                  ? 'with no baseline the value is not on the calibration scale at all'
+                  : 'whichever of the two is stricter'}
+              </span>
             </dd>
           </div>
         </dl>

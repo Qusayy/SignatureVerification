@@ -117,6 +117,7 @@ class ScoreDiagnosticsOut(BaseModel):
     relative_margin: float
     absolute_margin: float
     binding_term: str
+    floor_applied: bool = False
     normalised: float
     calibrator_domain: list[float]
     calibrator_clamped: str | None = None

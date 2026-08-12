@@ -342,6 +342,16 @@ class Verifier:
             # consistency. Where it did not — a single specimen on file — it is
             # not, and that case is warned about below.
             normalized = comparison.raw
+        # No baseline at all means `raw` is a bare similarity while the
+        # calibrator was fitted on margins — two different scales. Pushing it
+        # through anyway produces a confident-looking number that means
+        # nothing, which is how a 4.7% match came to read 69/100. Withhold the
+        # number instead; the interface already renders an uncalibrated result
+        # as a dash rather than a score.
+        scale_unavailable = self.cfg.writer_normalise and comparison.baseline_source == "none"
+        if scale_unavailable:
+            warnings.append("score_scale_unavailable")
+
         if comparison.specimens_disagree:
             # Louder than the population-baseline note, because this is a data
             # problem an operator can act on rather than a limitation of the
@@ -425,7 +435,9 @@ class Verifier:
             ink_fraction=preprocessed.ink_fraction,
             warnings=warnings,
             suspected_copy=suspected_copy,
-            calibrated=not self.calibrator.is_placeholder,
+            # A score off the calibrator's scale is no more calibrated than one
+            # from a placeholder curve, and must not be displayed as a number.
+            calibrated=not self.calibrator.is_placeholder and not scale_unavailable,
             model_version=self.model_version,
         )
 
@@ -444,6 +456,11 @@ class Verifier:
         floor = calibrator.genuine_similarity_floor or self.cfg.absolute_similarity_floor
         relative = combined - comparison.intra_reference_mean
         absolute = combined - floor
+        # What actually decided `raw`, not what would have. Reporting the
+        # latter told an investigation the floor had fired when it had not.
+        binding = "absolute floor" if comparison.floor_applied else "relative margin"
+        if not self.cfg.writer_normalise or comparison.baseline_source == "none":
+            binding = "nothing — the score has no baseline and is not comparable"
 
         domain_low = float(calibrator.x.min())
         domain_high = float(calibrator.x.max())
@@ -466,7 +483,8 @@ class Verifier:
             "floor_measured": bool(calibrator.genuine_similarity_floor),
             "relative_margin": round(relative, 5),
             "absolute_margin": round(absolute, 5),
-            "binding_term": "absolute floor" if absolute < relative else "relative margin",
+            "binding_term": binding,
+            "floor_applied": comparison.floor_applied,
             "normalised": round(result.normalized_score, 5),
             "calibrator_domain": [round(domain_low, 5), round(domain_high, 5)],
             "calibrator_clamped": clamped,

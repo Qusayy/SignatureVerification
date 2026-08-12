@@ -38,7 +38,11 @@ def test_identical_signature_scores_one():
 
 def test_single_reference_collapses_max_and_mean():
     rng = np.random.default_rng(1)
-    score = compare_to_references(rng.normal(size=DIM), rng.normal(size=(1, DIM)))
+    # writer_normalise=False: this asserts that one reference collapses max and
+    # mean, not how the result is expressed relative to a baseline or floor.
+    score = compare_to_references(
+        rng.normal(size=DIM), rng.normal(size=(1, DIM)), writer_normalise=False
+    )
     assert score.max_similarity == pytest.approx(score.mean_similarity)
     assert score.raw == pytest.approx(score.max_similarity)
 

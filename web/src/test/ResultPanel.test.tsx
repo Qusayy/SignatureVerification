@@ -203,6 +203,7 @@ describe('score breakdown', () => {
     relative_margin: 0.09,
     absolute_margin: 0.21,
     binding_term: 'relative margin',
+    floor_applied: false,
     normalised: 0.09,
     calibrator_domain: [-0.7, 0.15] as [number, number],
     calibrator_clamped: null,
@@ -224,7 +225,7 @@ describe('score breakdown', () => {
     )
     expect(screen.getByText('Score breakdown')).toBeInTheDocument()
     expect(screen.getByText('Baseline subtracted')).toBeInTheDocument()
-    expect(screen.getByText(/the relative margin/)).toBeInTheDocument()
+    expect(screen.getByText('relative margin')).toBeInTheDocument()
   })
 
   it('shouts when a low similarity produced a confident score', () => {
@@ -263,5 +264,57 @@ describe('score breakdown', () => {
       />,
     )
     expect(screen.getByText(/thin fit/i)).toBeInTheDocument()
+  })
+})
+
+describe('no baseline available', () => {
+  const noBaseline = {
+    combined_similarity: 0.047,
+    baseline: 0,
+    baseline_source: 'none',
+    similarity_floor: 0.6,
+    floor_measured: false,
+    relative_margin: 0.047,
+    absolute_margin: -0.553,
+    binding_term: 'nothing — the score has no baseline and is not comparable',
+    floor_applied: true,
+    normalised: -0.553,
+    calibrator_domain: [-0.7, 0.15] as [number, number],
+    calibrator_clamped: null,
+    calibrator_distinct_scores: 8,
+    calibrator_fit_samples: [72, 96] as [number, number],
+    model_version: 'signet@abc123',
+    inconsistent: false,
+  }
+
+  it('withholds the number rather than guessing one', () => {
+    // The reported failure: 4.7% similarity, no baseline, score 69/100.
+    render(
+      <ResultPanel
+        result={result({
+          calibrated: false,
+          warnings: ['score_scale_unavailable'],
+          diagnostics: noBaseline,
+        })}
+        onDecision={vi.fn()}
+        submitting={false}
+        decided={null}
+      />,
+    )
+    expect(screen.getByText('—')).toBeInTheDocument()
+    expect(screen.getByText('uncalibrated')).toBeInTheDocument()
+    expect(screen.getByText(/no scale on which to express a confidence/i)).toBeInTheDocument()
+  })
+
+  it('says plainly that nothing decided the score', () => {
+    render(
+      <ResultPanel
+        result={result({ calibrated: false, diagnostics: noBaseline })}
+        onDecision={vi.fn()}
+        submitting={false}
+        decided={null}
+      />,
+    )
+    expect(screen.getByText(/not on the calibration scale at all/i)).toBeInTheDocument()
   })
 })

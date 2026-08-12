@@ -18,6 +18,11 @@ const WARNING_TEXT: Record<string, string> = {
     'This model has not been calibrated. The number shown is indicative only, not a confidence.',
   stored_specimens_disagree:
     'The specimens on file for this customer do not resemble each other. Check the enrolment — they may be from different people, or one may be mis-cropped. Until that is resolved this score cannot be relied on.',
+  score_scale_unavailable:
+    'This customer has one specimen on file and the model has no population baseline to ' +
+    'compare against, so there is no scale on which to express a confidence. The number is ' +
+    'withheld rather than guessed. Re-run the benchmark to generate the baseline, or enrol ' +
+    'a second specimen.',
   score_uses_population_baseline:
     'Only one specimen is on file, so this customer’s own consistency cannot be measured. ' +
     'The score is judged against a typical customer instead, which makes it less reliable ' +

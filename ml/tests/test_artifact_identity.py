@@ -276,8 +276,9 @@ def test_a_consistent_writer_is_held_to_a_stricter_standard():
 def test_single_specimen_falls_back_rather_than_subtracting_zero():
     refs = np.array([[1.0, 0.0, 0.0]])
     score = compare_to_references(np.array([1.0, 0.0, 0.0]), refs, writer_normalise=True)
-    assert score.raw == pytest.approx(1.0)
+    # No per-customer baseline, so the floor is what remains.
     assert not score.is_writer_normalised
+    assert score.floor_applied
 
 
 def test_precomputed_reference_mean_matches_recomputation():
@@ -314,13 +315,31 @@ def test_single_specimen_uses_the_population_baseline():
     assert score.raw == pytest.approx(0.9 - 0.95, abs=1e-3)
 
 
-def test_single_specimen_without_a_population_baseline_is_flagged():
-    """Better to declare the score uncomparable than to quietly emit one."""
+def test_no_baseline_still_gets_the_absolute_floor():
+    """The reported failure, and the reason the escape hatch was wrong.
+
+    One specimen plus a calibrator carrying no population baseline used to mean
+    no baseline *and* no floor, so `raw` came through as a bare similarity: a
+    4.7% match scored 69/100. The case with the least information is the case
+    that most needs the backstop.
+    """
     refs = np.array([[1.0, 0.0, 0.0]])
     score = compare_to_references(np.array([1.0, 0.0, 0.0]), refs)
 
     assert score.baseline_source == "none"
-    assert score.raw == pytest.approx(1.0)
+    assert score.floor_applied
+    # Not the bare similarity: the floor decided it.
+    assert score.raw < 1.0
+
+
+def test_a_nonsense_match_with_no_baseline_is_still_rejected():
+    refs = np.array([[1.0, 0.0, 0.0]])
+    nearly_orthogonal = np.array([0.047, 0.999, 0.0])
+
+    score = compare_to_references(nearly_orthogonal, refs)
+
+    assert score.floor_applied
+    assert score.raw < 0, "a 4.7% match produced a non-negative margin"
 
 
 def test_several_specimens_prefer_their_own_baseline():

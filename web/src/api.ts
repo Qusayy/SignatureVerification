@@ -77,6 +77,7 @@ export interface ScoreDiagnostics {
   relative_margin: number
   absolute_margin: number
   binding_term: string
+  floor_applied: boolean
   normalised: number
   calibrator_domain: [number, number]
   calibrator_clamped: 'below' | 'above' | null
