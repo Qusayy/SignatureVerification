@@ -36,6 +36,9 @@ docs/writer-count-ablation*.md
 docs/writer-count-ablation*.json
 docs/*.png
 
+# Internal product notes - kept local, not part of the public repository
+PRODUCT.md
+
 # Local env
 .env
 .env.local
