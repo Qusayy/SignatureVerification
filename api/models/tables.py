@@ -115,8 +115,12 @@ class CustomerEnrolment(Base):
     __tablename__ = "customer_enrolments"
 
     customer_id: Mapped[str] = mapped_column(ForeignKey("customers.id"), primary_key=True)
-    cohort_mean: Mapped[float] = mapped_column(Float)
-    cohort_std: Mapped[float] = mapped_column(Float)
+    # Retained so historical rows keep their shape and `schema_drift` stays
+    # quiet. Cohort normalisation left the serving path — it cost 15.7 EER
+    # points, because it answers the random-impostor question, which is already
+    # solved at 0.00%. Nothing writes these any more.
+    cohort_mean: Mapped[float] = mapped_column(Float, default=0.0)
+    cohort_std: Mapped[float] = mapped_column(Float, default=0.0)
     # Mean pairwise similarity among this customer's own specimens: how
     # consistently they sign. Every score is expressed relative to it, so it is
     # cached here rather than recomputed per verification.

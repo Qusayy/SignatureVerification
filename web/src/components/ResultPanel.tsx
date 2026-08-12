@@ -11,25 +11,17 @@ interface Props {
   decided: 'accept' | 'reject' | null
 }
 
+/**
+ * Only warnings an operator can act on mid-transaction.
+ *
+ * The list used to include several notes about the score itself being less
+ * reliable than usual — single specimen, no per-customer baseline, uncalibrated.
+ * With one specimen per customer as the design point rather than the exception,
+ * those fired on every verification and said nothing the operator could use.
+ * Conditions that genuinely make a score meaningless are now refusals at
+ * startup, where an engineer sees them.
+ */
 const WARNING_TEXT: Record<string, string> = {
-  single_reference_lower_confidence:
-    'Only one specimen signature is on file for this customer, so confidence is lower than usual.',
-  uncalibrated_score_placeholder:
-    'This model has not been calibrated. The number shown is indicative only, not a confidence.',
-  stored_specimens_disagree:
-    'The specimens on file for this customer do not resemble each other. Check the enrolment — they may be from different people, or one may be mis-cropped. Until that is resolved this score cannot be relied on.',
-  score_scale_unavailable:
-    'This customer has one specimen on file and the model has no population baseline to ' +
-    'compare against, so there is no scale on which to express a confidence. The number is ' +
-    'withheld rather than guessed. Re-run the benchmark to generate the baseline, or enrol ' +
-    'a second specimen.',
-  score_uses_population_baseline:
-    'Only one specimen is on file, so this customer’s own consistency cannot be measured. ' +
-    'The score is judged against a typical customer instead, which makes it less reliable ' +
-    'than it would be with two or three specimens.',
-  score_not_writer_normalised:
-    'This score has no per-customer baseline and is not comparable with other customers. ' +
-    'Treat it as indicative only.',
   ink_outside_detected_region:
     'Some handwriting fell outside the detected region. Check the located area, and draw ' +
     'the box manually if part of the signature was cut off.',
@@ -40,21 +32,6 @@ const WARNING_TEXT: Record<string, string> = {
   blank_or_near_blank: 'Very little ink was found in the captured area.',
 }
 
-/**
- * Put the margin in words.
- *
- * The score is driven by the gap between how well the query matches the
- * specimens and how well the specimens match each other — not by the raw
- * similarity, which is what an operator's eye goes to first.
- */
-function describeMargin(margin: number, source: string): string {
-  const whose = source === 'own' ? 'this customer’s' : 'the typical'
-  if (margin >= 0.02) return `Comfortably within ${whose} normal variation.`
-  if (margin >= 0) return `About as consistent as ${whose} own signatures are.`
-  if (margin >= -0.02) return `Slightly outside ${whose} normal variation — worth a look.`
-  return `Noticeably less consistent than ${whose} own signatures.`
-}
-
 export function ResultPanel({ result, onDecision, submitting, decided }: Props) {
   const [note, setNote] = useState('')
   const [view, setView] = useState<'overlay' | 'crop'>('overlay')
@@ -62,7 +39,12 @@ export function ResultPanel({ result, onDecision, submitting, decided }: Props) 
   return (
     <section className="result" aria-live="polite">
       <div className="result__header">
-        <ScoreGauge score={result.score} band={result.band} calibrated={result.calibrated} />
+        <ScoreGauge
+          score={result.score}
+          band={result.band}
+          greenMin={result.diagnostics?.green_min}
+          redMax={result.diagnostics?.red_max}
+        />
         <div className="result__summary">
           <h2>{result.guidance}</h2>
           <p className="result__reason">{result.reason}</p>
@@ -84,27 +66,13 @@ export function ResultPanel({ result, onDecision, submitting, decided }: Props) 
 
           <dl className="result__meta">
             <div>
-              <dt>Specimens compared</dt>
+              <dt>Matched the specimen at</dt>
+              <dd>{(result.comparison.similarity * 100).toFixed(1)}%</dd>
+            </div>
+            <div>
+              <dt>Specimens on file</dt>
               <dd>{result.comparison.n_references}</dd>
             </div>
-            <div>
-              <dt>Closest specimen</dt>
-              <dd>{(result.comparison.max_similarity * 100).toFixed(1)}%</dd>
-            </div>
-            <div>
-              <dt>Average across specimens</dt>
-              <dd>{(result.comparison.mean_similarity * 100).toFixed(1)}%</dd>
-            </div>
-            {result.comparison.baseline_source !== 'none' && (
-              <div>
-                <dt>
-                  {result.comparison.baseline_source === 'own'
-                    ? 'Specimens agree with each other'
-                    : 'Typical customer consistency'}
-                </dt>
-                <dd>{(result.comparison.intra_reference_mean * 100).toFixed(1)}%</dd>
-              </div>
-            )}
             <div>
               <dt>Time</dt>
               <dd>{(result.latency_ms / 1000).toFixed(1)}s</dd>
@@ -112,29 +80,27 @@ export function ResultPanel({ result, onDecision, submitting, decided }: Props) 
           </dl>
 
           {/*
-            Without the third figure the first two do not explain the score,
-            and the panel reads as broken: 89% against the specimens looks like
-            a match until you know the customer's own specimens agree at 88.5%.
-            The comparison is the point, so state it in words rather than
-            leaving the operator to subtract.
+            A bare 46 is not actionable. The same 46 beside "1 in 4 genuine
+            signatures match this poorly, and 1 in 5 forgeries match this well"
+            is. The shares are measured on held-out signers, so they describe
+            this model rather than making a general claim about signatures.
           */}
-          {result.comparison.baseline_source !== 'none' && (
+          {result.diagnostics?.genuine_share_at_or_above != null && (
             <p className="result__reason">
-              This signature matches{' '}
               <strong>
-                {(result.comparison.mean_similarity * 100).toFixed(1)}%
+                {(result.diagnostics.genuine_share_at_or_above * 100).toFixed(0)}%
               </strong>{' '}
-              on average, against a baseline of{' '}
-              <strong>
-                {(result.comparison.intra_reference_mean * 100).toFixed(1)}%
-              </strong>{' '}
-              {result.comparison.baseline_source === 'own'
-                ? '— how well this customer’s own specimens match each other.'
-                : '— typical for a customer, since only one specimen is on file.'}{' '}
-              {describeMargin(
-                result.comparison.mean_similarity - result.comparison.intra_reference_mean,
-                result.comparison.baseline_source,
+              of genuine signatures match at least this well
+              {result.diagnostics.impostor_share_at_or_above != null && (
+                <>
+                  , and{' '}
+                  <strong>
+                    {(result.diagnostics.impostor_share_at_or_above * 100).toFixed(0)}%
+                  </strong>{' '}
+                  of practised forgeries do
+                </>
               )}
+              .
             </p>
           )}
 

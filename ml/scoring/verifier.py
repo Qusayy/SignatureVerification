@@ -1,9 +1,13 @@
 """End-to-end verification: image in, advisory score out.
 
 This is the single entry point the API calls. It owns the whole chain —
-preprocess, embed, compare against the customer's specimens, cohort-normalise,
-calibrate, band — so that the training pipeline and the live service can never
-drift apart in how they treat an image.
+preprocess, embed, compare against the customer's stored specimen, calibrate,
+band — so that the training pipeline and the live service can never drift apart
+in how they treat an image.
+
+The deployment protocol is one specimen per customer. The calibrator records the
+protocol it was fitted for and this module refuses a mismatch, because a curve
+fitted for one and applied to another produces plausible, wrong numbers.
 
 Everything it returns is advisory. There is no accept/reject anywhere in this
 module by design; the employee decides.
@@ -24,11 +28,16 @@ from ml.preprocess.pipeline import (
     to_model_input,
 )
 from ml.preprocess.trace import PipelineTrace, vector_strip
-from ml.scoring.calibrate import Band, ScoreCalibrator
+from ml.scoring.calibrate import Band, CalibratorSchemaError, ScoreCalibrator
 from ml.scoring.compare import ComparisonScore, compare_to_references, intra_reference_mean
-from ml.scoring.znorm import CohortNormalizer, CohortStats
 
-__all__ = ["Verifier", "VerificationResult", "EnrolmentBundle", "ArtifactMismatch"]
+__all__ = [
+    "Verifier",
+    "VerificationResult",
+    "EnrolmentBundle",
+    "ArtifactMismatch",
+    "CalibratorUnavailable",
+]
 
 
 @dataclass
@@ -37,21 +46,11 @@ class EnrolmentBundle:
 
     signer_id: str
     embeddings: np.ndarray  # (N, D), L2-normalised
-    cohort_stats: CohortStats | None = None
     canvases: list[np.ndarray] = field(default_factory=list)  # for the overlay and copy check
-    # Mean pairwise similarity among this customer's own specimens, computed
-    # once at enrolment. None means "not cached" and it is recomputed per
-    # verification, which is correct but wasteful.
-    reference_mean: float | None = None
 
     @property
     def n_references(self) -> int:
         return int(self.embeddings.shape[0])
-
-    def resolved_reference_mean(self) -> float:
-        if self.reference_mean is not None:
-            return self.reference_mean
-        return intra_reference_mean(self.embeddings)
 
 
 @dataclass
@@ -87,7 +86,17 @@ class VerificationResult:
 
 
 class ArtifactMismatch(RuntimeError):
-    """A cohort or calibrator does not belong to the loaded weights."""
+    """A calibrator does not belong to the loaded weights."""
+
+
+class CalibratorUnavailable(RuntimeError):
+    """No usable calibrator, so no meaningful score can be produced.
+
+    Raised at load time rather than tolerated, because the alternative is a dash
+    on the gauge at the counter — where the operator has already captured the
+    signature, already waited, and can do nothing with the non-answer. A service
+    that cannot score should not accept the request in the first place.
+    """
 
 
 def _assert_same_weights(path: Path, artifact_id: str, model_id: str, checkpoint: Path) -> None:
@@ -133,16 +142,14 @@ class Verifier:
         self,
         model: torch.nn.Module,
         *,
-        cohort: CohortNormalizer | None = None,
-        calibrator: ScoreCalibrator | None = None,
+        calibrator: ScoreCalibrator,
         device: str | None = None,
         cfg: ScoringConfig = SCORING,
         model_version: str = "",
     ):
         self.device = device or resolve_device()
         self.model = model.to(self.device).eval()
-        self.cohort = cohort
-        self.calibrator = calibrator or ScoreCalibrator.identity()
+        self.calibrator = calibrator
         self.cfg = cfg
         self.model_version = model_version
 
@@ -153,27 +160,24 @@ class Verifier:
         cls,
         checkpoint: Path | str | None = None,
         *,
-        cohort_path: Path | str | None = None,
         calibrator_path: Path | str | None = None,
         device: str | None = None,
+        cfg: ScoringConfig = SCORING,
     ) -> Verifier:
         """Load a verifier from the artifact directory.
 
-        Missing cohort or calibrator files are tolerated so the stack can run
-        before they have been produced, but the result is flagged
-        ``calibrated=False`` and must be labelled as such in the UI.
-
-        A cohort or calibrator produced by *different weights* is not tolerated.
-        Both are functions of a specific embedding space, and pairing them with
-        another model produces scores in an entirely normal-looking range that
-        mean nothing at all. That shipped: ``cohort.npz`` and
-        ``calibrator.json`` were built by one checkpoint while the service
-        loaded another, and the result was two thirds of skilled forgeries
-        printing 99.5 out of 100 — indistinguishable, on screen, from the
-        system working perfectly.
+        Refuses rather than degrades. A calibrator that is missing, from other
+        weights, from an older schema, or fitted for a different number of
+        specimens cannot produce a meaningful number, and the alternative to
+        refusing is a confident-looking one. Both failures have shipped here:
+        artifacts from one checkpoint served alongside another printed 99.5 for
+        two thirds of skilled forgeries, and a curve fitted on six specimens
+        applied to one scored a 4.7% match at 69/100.
 
         Raises:
-            ArtifactMismatch: the cohort or calibrator belongs to other weights.
+            ArtifactMismatch: the calibrator belongs to other weights.
+            CalibratorSchemaError: the calibrator predates the current scoring.
+            CalibratorUnavailable: absent, or fitted for another protocol.
         """
         from ml.embed.models import load_checkpoint
         from ml.embed.provenance import weights_id as compute_weights_id
@@ -183,23 +187,37 @@ class Verifier:
 
         model_id = payload.get("weights_id") or compute_weights_id(payload["model_state"])
 
-        cohort = None
-        cohort_path = Path(cohort_path or ARTIFACT_ROOT / "cohort.npz")
-        if cohort_path.exists():
-            cohort = CohortNormalizer.load(cohort_path)
-            _assert_same_weights(cohort_path, getattr(cohort, "weights_id", ""), model_id, checkpoint)
-
-        calibrator = None
         calibrator_path = Path(calibrator_path or ARTIFACT_ROOT / "calibrator.json")
-        if calibrator_path.exists():
-            calibrator = ScoreCalibrator.load(calibrator_path)
-            _assert_same_weights(calibrator_path, calibrator.weights_id, model_id, checkpoint)
+        if not calibrator_path.exists():
+            raise CalibratorUnavailable(
+                f"No calibrator at {calibrator_path}. Without it a similarity cannot be "
+                "turned into a confidence, and serving a number anyway is how a 4.7% "
+                "match came to read 69/100. Produce one:\n"
+                f"    python -m ml.eval.benchmark --checkpoint {checkpoint} --split test"
+            )
+
+        # Raises CalibratorSchemaError on a pre-rework artifact, which was
+        # fitted on writer-normalised margins and cannot be applied to a
+        # similarity.
+        calibrator = ScoreCalibrator.load(calibrator_path)
+        _assert_same_weights(calibrator_path, calibrator.weights_id, model_id, checkpoint)
+
+        if calibrator.protocol_references != cfg.calibration_references:
+            raise CalibratorUnavailable(
+                f"{calibrator_path.name} was fitted for "
+                f"{calibrator.protocol_references} specimen(s) per customer, but this "
+                f"service verifies against {cfg.calibration_references}. A curve fitted "
+                "for one protocol and applied to another produces plausible, wrong "
+                "numbers — that mismatch is what this check exists to prevent. "
+                "Regenerate:\n"
+                f"    python -m ml.eval.benchmark --checkpoint {checkpoint} --split test"
+            )
 
         return cls(
             model,
-            cohort=cohort,
             calibrator=calibrator,
             device=device,
+            cfg=cfg,
             model_version=f"{payload.get('architecture', '?')}@{model_id}",
         )
 
@@ -227,23 +245,15 @@ class Verifier:
     # -- enrolment --------------------------------------------------------
 
     def enrol(self, signer_id: str, reference_images: list[np.ndarray]) -> EnrolmentBundle:
-        """Prepare a customer's stored specimens for fast repeated verification.
-
-        The cohort statistics are computed here, once, rather than on every
-        verification: they only change when the customer's specimens change.
-        """
+        """Embed a customer's stored specimen(s) once, for repeated verification."""
         if not reference_images:
             raise ValueError(f"Customer {signer_id} has no reference signatures to enrol")
 
         canvases = [self.preprocess(img).image for img in reference_images]
-        embeddings = self.embed_canvases(canvases)
-        stats = self.cohort.enrolment_stats(embeddings) if self.cohort else None
         return EnrolmentBundle(
             signer_id=signer_id,
-            embeddings=embeddings,
-            cohort_stats=stats,
+            embeddings=self.embed_canvases(canvases),
             canvases=canvases,
-            reference_mean=intra_reference_mean(embeddings),
         )
 
     # -- verification -----------------------------------------------------
@@ -295,133 +305,57 @@ class Verifier:
                 model=self.model_version or "unversioned",
             )
 
-        comparison = compare_to_references(
-            query_embedding,
-            enrolment.embeddings,
-            writer_normalise=self.cfg.writer_normalise,
-            reference_mean=enrolment.resolved_reference_mean(),
-            # Substitute for customers with a single specimen, whose own
-            # consistency cannot be measured. Without it their score is a bare
-            # similarity fed into a curve fitted on margins, and clips to 100.
-            population_reference_mean=self.calibrator.population_reference_mean,
-            # Measured on this corpus rather than assumed. The absolute cosine
-            # scale is a property of the trained model, so a constant tuned
-            # elsewhere would either never fire or reject everything.
-            similarity_floor=self.calibrator.genuine_similarity_floor,
-        )
+        comparison = compare_to_references(query_embedding, enrolment.embeddings, cfg=self.cfg)
 
         if trace:
             trace.add(
                 "compare",
-                "Compared to specimens",
-                "Cosine similarity against every specimen on file. The specimens are "
-                "combined rather than taking the single best match, so one unusually "
-                "close reference cannot carry the result.",
+                "Compared to the stored specimen",
+                "Cosine similarity between this signature and what is on file. Nothing "
+                "is subtracted from it and nothing is normalised away — the number below "
+                "is what the calibration curve reads.",
                 kind="compare",
                 per_reference=[round(float(v), 4) for v in comparison.per_reference],
-                combined=round(
-                    float(comparison.raw + comparison.intra_reference_mean), 4
-                ),
+                combined=round(float(comparison.similarity), 4),
                 best=round(float(comparison.max_similarity), 4),
                 worst=round(float(comparison.min_similarity), 4),
                 n_references=int(comparison.n_references),
             )
 
         warnings = list(preprocessed.warnings)
-        if self.cohort is not None and self.cfg.cohort_normalise:
-            normalized = self.cohort.snorm(
-                comparison.raw,
-                query_embedding,
-                references=enrolment.embeddings,
-                enrolment=enrolment.cohort_stats,
-            )
-        else:
-            # The comparison score goes through unchanged. It is already
-            # comparable across customers when writer normalisation applied,
-            # because it is expressed relative to each customer's own specimen
-            # consistency. Where it did not — a single specimen on file — it is
-            # not, and that case is warned about below.
-            normalized = comparison.raw
-        # No baseline at all means `raw` is a bare similarity while the
-        # calibrator was fitted on margins — two different scales. Pushing it
-        # through anyway produces a confident-looking number that means
-        # nothing, which is how a 4.7% match came to read 69/100. Withhold the
-        # number instead; the interface already renders an uncalibrated result
-        # as a dash rather than a score.
-        scale_unavailable = self.cfg.writer_normalise and comparison.baseline_source == "none"
-        if scale_unavailable:
-            warnings.append("score_scale_unavailable")
 
-        if comparison.specimens_disagree:
-            # Louder than the population-baseline note, because this is a data
-            # problem an operator can act on rather than a limitation of the
-            # score: the specimens on file do not look like the same hand.
-            warnings.append("stored_specimens_disagree")
-        elif self.cfg.writer_normalise and comparison.baseline_source != "own":
-            warnings.append(
-                "score_uses_population_baseline"
-                if comparison.baseline_source == "population"
-                else "score_not_writer_normalised"
-            )
+        score = self.calibrator.score_0_100(comparison.similarity)
+        band = self.calibrator.band(comparison.similarity)
+        green_min, red_max = self.calibrator.effective_edges()
 
         if trace:
-            if comparison.is_writer_normalised:
-                caption = (
-                    "The similarity is re-expressed against how consistently this customer "
-                    "signs — the average agreement among their own specimens. The question "
-                    "becomes 'is this as close to the specimens as they are to each other?', "
-                    "which is what a skilled forgery is built to defeat. Someone with a very "
-                    "repeatable hand is held to a stricter standard than someone whose own "
-                    "signature varies."
+            reaching = self.calibrator.share_reaching(comparison.similarity, "genuine")
+            forgers = self.calibrator.share_reaching(comparison.similarity, "skilled")
+            context = ""
+            if reaching is not None:
+                context = (
+                    f" About {reaching:.0%} of genuine signatures and {forgers:.0%} of "
+                    "practised forgeries reach this level."
+                    if forgers is not None
+                    else f" About {reaching:.0%} of genuine signatures reach this level."
                 )
-            else:
-                caption = (
-                    "Only one specimen is on file, so there is no way to measure how "
-                    "consistently this customer signs and the similarity is used as-is. "
-                    "Scores for single-specimen customers are less comparable than others."
-                )
-            trace.add(
-                "cohort",
-                "Normalised to the customer",
-                caption,
-                kind="score",
-                raw_similarity=round(
-                    float(comparison.raw + comparison.intra_reference_mean), 4
-                ),
-                specimen_agreement=round(float(comparison.intra_reference_mean), 4),
-                normalised=round(float(normalized), 4),
-                method=(
-                    "S-norm (cohort)"
-                    if (self.cohort is not None and self.cfg.cohort_normalise)
-                    else "writer-internal"
-                    if comparison.is_writer_normalised
-                    else "none (raw passed through)"
-                ),
-            )
-
-        score = self.calibrator.score_0_100(normalized)
-        band = self.calibrator.band(normalized, self.cfg)
-
-        if trace:
             trace.add(
                 "calibration",
                 "Calibrated to a score",
-                "An isotonic calibration fitted on held-out signers converts the "
-                "normalised similarity into a 0-100 confidence, so the number means the "
-                "same thing for every customer. The band is advice; the decision is yours.",
+                "A curve fitted on held-out signers converts the similarity into the "
+                "chance this signature is genuine. The bands come from the same "
+                "measurement: green admits at most "
+                f"{self.calibrator.operating_points.get('green_max_far', 0.05):.0%} of "
+                "forgeries. The band is advice; the decision is yours." + context,
                 kind="score",
-                normalised=round(float(normalized), 4),
+                similarity=round(float(comparison.similarity), 4),
                 score=round(float(score), 1),
                 band=band.value,
-                calibrated=not self.calibrator.is_placeholder,
+                green_from=green_min,
+                red_below=red_max,
             )
 
-        if self.calibrator.is_placeholder:
-            warnings.append("uncalibrated_score_placeholder")
-        if comparison.is_single_reference:
-            warnings.append("single_reference_lower_confidence")
-
-        suspected_copy = self._is_suspected_copy(preprocessed.image, enrolment, score)
+        suspected_copy = self._is_suspected_copy(preprocessed.image, enrolment, comparison)
         if suspected_copy:
             warnings.append("suspected_photocopy_of_stored_specimen")
 
@@ -430,14 +364,16 @@ class Verifier:
             band=band,
             guidance=band.guidance,
             comparison=comparison,
-            normalized_score=normalized,
+            normalized_score=comparison.similarity,
             query_canvas=preprocessed.image,
             ink_fraction=preprocessed.ink_fraction,
             warnings=warnings,
             suspected_copy=suspected_copy,
-            # A score off the calibrator's scale is no more calibrated than one
-            # from a placeholder curve, and must not be displayed as a number.
-            calibrated=not self.calibrator.is_placeholder and not scale_unavailable,
+            # Always true on the serving path. A calibrator that cannot produce
+            # a meaningful number is refused at load time rather than producing
+            # a dash at the counter, where the operator has already spent the
+            # time and can do nothing with it.
+            calibrated=True,
             model_version=self.model_version,
         )
 
@@ -450,52 +386,41 @@ class Verifier:
         the arithmetic shown beside it.
         """
         calibrator = self.calibrator
-        comparison = result.comparison
-        combined = comparison.raw + comparison.intra_reference_mean
-
-        floor = calibrator.genuine_similarity_floor or self.cfg.absolute_similarity_floor
-        relative = combined - comparison.intra_reference_mean
-        absolute = combined - floor
-        # What actually decided `raw`, not what would have. Reporting the
-        # latter told an investigation the floor had fired when it had not.
-        binding = "absolute floor" if comparison.floor_applied else "relative margin"
-        if not self.cfg.writer_normalise or comparison.baseline_source == "none":
-            binding = "nothing — the score has no baseline and is not comparable"
+        similarity = result.comparison.similarity
+        green_min, red_max = calibrator.effective_edges()
 
         domain_low = float(calibrator.x.min())
         domain_high = float(calibrator.x.max())
         clamped = None
-        if result.normalized_score < domain_low:
+        if similarity < domain_low:
             clamped = "below"
-        elif result.normalized_score > domain_high:
+        elif similarity > domain_high:
             clamped = "above"
 
-        # The check that matters: a similarity no genuine signature reaches
-        # must not produce a confident score. If this trips, the score is not
-        # to be trusted whatever else the panel says.
-        inconsistent = combined < floor and result.score >= 50.0
-
         return {
-            "combined_similarity": round(combined, 5),
-            "baseline": round(comparison.intra_reference_mean, 5),
-            "baseline_source": comparison.baseline_source,
-            "similarity_floor": round(float(floor), 5),
-            "floor_measured": bool(calibrator.genuine_similarity_floor),
-            "relative_margin": round(relative, 5),
-            "absolute_margin": round(absolute, 5),
-            "binding_term": binding,
-            "floor_applied": comparison.floor_applied,
-            "normalised": round(result.normalized_score, 5),
+            "similarity": round(float(similarity), 5),
+            "score": round(float(result.score), 1),
+            "band": result.band.value,
+            "green_min": green_min,
+            "red_max": red_max,
+            "green_max_far": calibrator.operating_points.get("green_max_far"),
+            "red_max_frr": calibrator.operating_points.get("red_max_frr"),
+            "genuine_share_at_or_above": calibrator.share_reaching(similarity, "genuine"),
+            "impostor_share_at_or_above": calibrator.share_reaching(similarity, "skilled"),
             "calibrator_domain": [round(domain_low, 5), round(domain_high, 5)],
             "calibrator_clamped": clamped,
-            "calibrator_distinct_scores": len({round(float(v) * 100, 1) for v in calibrator.y}),
+            "calibrator_distinct_scores": calibrator.distinct_scores,
             "calibrator_fit_samples": [calibrator.n_fit_genuine, calibrator.n_fit_impostor],
+            "calibrator_thin_fit": calibrator.thin_fit,
+            "protocol_references": calibrator.protocol_references,
             "model_version": self.model_version,
-            "inconsistent": inconsistent,
         }
 
     def _is_suspected_copy(
-        self, query_canvas: np.ndarray, enrolment: EnrolmentBundle, score: float
+        self,
+        query_canvas: np.ndarray,
+        enrolment: EnrolmentBundle,
+        comparison: ComparisonScore,
     ) -> bool:
         """Detect a photocopy of the stored specimen pasted onto the form.
 
@@ -504,8 +429,17 @@ class Verifier:
         therefore indicates a copy, which is a fraud signal, not the strongest
         possible match. Without this check the highest-scoring case the system
         can produce is an attack.
+
+        Gated on the **similarity**, not on the calibrated score. It used to
+        require a score ≥ 99, which stopped being reachable the moment honest
+        calibration lowered the ceiling — a fraud control silently disabled by
+        an unrelated improvement. The similarity threshold comes from the
+        calibrator (the 99.9th percentile of genuine), so it tracks the model
+        rather than a constant.
         """
-        if score < self.cfg.duplicate_score_min or not enrolment.canvases:
+        if comparison.similarity < self.calibrator.duplicate_similarity_min:
+            return False
+        if not enrolment.canvases:
             return False
         return any(
             _canvas_iou(query_canvas, ref) >= self.cfg.duplicate_iou_min

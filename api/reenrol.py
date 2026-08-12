@@ -91,15 +91,10 @@ def reenrol(session, service, store, *, dry_run: bool = False) -> dict:
         if not embeddings:
             continue
 
-        stats, reference_mean = service.enrolment_state(np.vstack(embeddings))
+        agreement = service.specimen_agreement(np.vstack(embeddings))
         if not dry_run:
             enrolment = customer.enrolment or CustomerEnrolment(customer_id=customer.id)
-            # Zeroed rather than left stale when the cohort is unavailable: a
-            # cohort statistic from a previous model looks entirely valid and
-            # is not.
-            enrolment.cohort_mean = stats.mean if stats else 0.0
-            enrolment.cohort_std = stats.std if stats else 0.0
-            enrolment.intra_reference_mean = reference_mean
+            enrolment.intra_reference_mean = agreement
             enrolment.n_references = len(embeddings)
             enrolment.model_version = current
             session.add(enrolment)

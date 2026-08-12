@@ -36,6 +36,7 @@ from sqlalchemy import select
 from api.db import get_sessionmaker, init_db, schema_drift
 from api.models.tables import Customer, CustomerEnrolment, Employee, ReferenceSignature
 from api.settings import get_settings
+from ml.config import SCORING
 
 OK, WARN, FAIL = "OK", "WARN", "FAIL"
 
@@ -137,32 +138,25 @@ def check_artifacts(report: Report) -> None:
         return
     report.add("checkpoint", OK, str(settings.checkpoint_path))
 
-    missing = [
-        (name, path)
-        for name, path in (
-            ("cohort", settings.cohort_path),
-            ("calibrator", settings.calibrator_path),
-        )
-        if not path.exists()
-    ]
-    for name, path in missing:
+    if not settings.calibrator_path.exists():
         report.add(
-            name,
-            WARN,
-            f"missing: {path} - scores will be raw similarity, not calibrated",
+            "calibrator",
+            FAIL,
+            f"missing: {settings.calibrator_path} - the service will refuse to start",
             [
-                "Both are written by the benchmark run:",
+                "Without a calibrator a similarity cannot be turned into a confidence,",
+                "and serving a number anyway is how a 4.7% match came to read 69/100.",
                 f"  python -m ml.eval.benchmark --checkpoint {settings.checkpoint_path} "
                 "--split test",
             ],
         )
+        return
     # Do the artifacts actually belong to this checkpoint? Until this check
     # existed, `cohort.npz` and `calibrator.json` produced by one training run
     # were served alongside another run's weights, and the only symptom was
     # that two thirds of skilled forgeries scored 99.5 out of 100.
     from ml.embed.provenance import read_weights_id
-    from ml.scoring.calibrate import ScoreCalibrator
-    from ml.scoring.znorm import CohortNormalizer
+    from ml.scoring.calibrate import CalibratorSchemaError, ScoreCalibrator
 
     try:
         model_id = read_weights_id(settings.checkpoint_path)
@@ -170,15 +164,25 @@ def check_artifacts(report: Report) -> None:
         report.add("artifact identity", FAIL, f"could not read the checkpoint: {exc}")
         return
 
-    stamps: list[tuple[str, Path, str]] = []
-    if settings.cohort_path.exists():
-        stamps.append(
-            ("cohort", settings.cohort_path, getattr(CohortNormalizer.load(settings.cohort_path), "weights_id", ""))
+    try:
+        calibrator = ScoreCalibrator.load(settings.calibrator_path)
+    except CalibratorSchemaError as exc:
+        report.add(
+            "calibrator schema",
+            FAIL,
+            str(exc).splitlines()[0],
+            [
+                "A pre-rework curve was fitted on writer-normalised margins and cannot",
+                "be applied to a similarity. Regenerate it:",
+                f"  python -m ml.eval.benchmark --checkpoint {settings.checkpoint_path} "
+                "--split test",
+            ],
         )
-    if settings.calibrator_path.exists():
-        stamps.append(
-            ("calibrator", settings.calibrator_path, ScoreCalibrator.load(settings.calibrator_path).weights_id)
-        )
+        return
+
+    stamps: list[tuple[str, Path, str]] = [
+        ("calibrator", settings.calibrator_path, calibrator.weights_id)
+    ]
 
     for name, path, stamp in stamps:
         if stamp == model_id:
@@ -193,8 +197,8 @@ def check_artifacts(report: Report) -> None:
                     else f"carries no weights stamp and cannot be matched to {model_id}"
                 ),
                 [
-                    "A cohort or calibrator from another run gives scores in a normal",
-                    "range that mean nothing. Regenerate both against this checkpoint:",
+                    "A calibrator from another run gives scores in a normal range that",
+                    "mean nothing. Regenerate it against this checkpoint:",
                     f"  python -m ml.eval.benchmark --checkpoint {settings.checkpoint_path} "
                     "--split test",
                     "  python -m api.reenrol --apply",
@@ -211,32 +215,42 @@ def check_model(report: Report) -> str:
             "model load",
             FAIL,
             service.load_error or "not loaded",
-            ["Fix the checkpoint path above, then re-run this command."],
+            [
+                "The service refuses to start without a usable calibrator rather than",
+                "serving a number it cannot stand behind. Produce one:",
+                f"  python -m ml.eval.benchmark --checkpoint {get_settings().checkpoint_path} "
+                "--split test",
+            ],
         )
         return ""
 
     status = service.status()
     report.add("model load", OK, f"{status['model_version']}")
-    if not status["calibrated"]:
-        report.add("calibration", WARN, "placeholder calibrator; scores are uncalibrated")
-    else:
-        report.add("calibration", OK, "isotonic calibrator loaded")
-    # Not a warning either way. Cohort normalisation is off by default because
-    # it measured worse; what matters is that scores are normalised somehow.
+    # The protocol the curve was fitted for must match what the service runs.
+    # A curve fitted on six specimens per customer and applied to one produces
+    # plausible, wrong numbers — that mismatch is the reason every score this
+    # system showed before the rework was meaningless.
+    refs = status.get("calibration_references", 0)
     report.add(
-        "score normalisation",
-        OK if status.get("writer_normalisation") or status["cohort_normalisation"] else WARN,
-        ", ".join(
-            filter(
-                None,
-                [
-                    "writer-internal" if status.get("writer_normalisation") else "",
-                    "cohort S-norm" if status["cohort_normalisation"] else "",
-                ],
-            )
-        )
-        or "none; raw similarity is not comparable across customers",
+        "calibration protocol",
+        OK if refs == SCORING.calibration_references else FAIL,
+        f"fitted for {refs} specimen(s) per customer; the service verifies against "
+        f"{SCORING.calibration_references}",
+        []
+        if refs == SCORING.calibration_references
+        else [
+            "Regenerate the calibrator against the served protocol:",
+            f"  python -m ml.eval.benchmark --checkpoint {get_settings().checkpoint_path} "
+            "--split test",
+        ],
     )
+    if status.get("calibrator_thin_fit"):
+        report.add(
+            "calibration size",
+            WARN,
+            "fitted on fewer than 200 comparisons per class; the curve is coarse and "
+            "its ceiling conservative. More validation *writers* is the fix.",
+        )
     return status["model_version"] or ""
 
 

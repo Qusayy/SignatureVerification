@@ -179,18 +179,15 @@ def _refresh_enrolment(session: Session, customer: Customer, service) -> None:
 
     embeddings = np.asarray([r.embedding for r in customer.references], dtype=np.float64)
     try:
-        stats, reference_mean = service.enrolment_state(embeddings)
+        agreement = service.specimen_agreement(embeddings)
     except ModelNotLoaded:
         return
 
-    # Written whether or not a cohort exists. The specimen-agreement figure is
-    # what every score is expressed relative to, so skipping the row when the
-    # cohort is off — which is the default — would silently drop each customer
-    # back to an unnormalised score.
+    # The row exists to record which model produced these embeddings, which is
+    # what `api.reenrol` and the stale-enrolment refusal read. The agreement
+    # figure is a broken-enrolment diagnostic; nothing scores with it.
     enrolment = customer.enrolment or CustomerEnrolment(customer_id=customer.id)
-    enrolment.cohort_mean = stats.mean if stats else 0.0
-    enrolment.cohort_std = stats.std if stats else 0.0
-    enrolment.intra_reference_mean = reference_mean
+    enrolment.intra_reference_mean = agreement
     enrolment.n_references = len(customer.references)
     enrolment.model_version = service.verifier.model_version if service.verifier else ""
     session.add(enrolment)

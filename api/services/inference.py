@@ -26,7 +26,6 @@ from ml.preprocess.trace import PipelineTrace, Stage
 from ml.scoring.compare import intra_reference_mean
 from ml.scoring.explain import difference_overlay, reason_text
 from ml.scoring.verifier import EnrolmentBundle, VerificationResult, Verifier
-from ml.scoring.znorm import CohortStats
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +92,6 @@ class InferenceService:
         try:
             self.verifier = Verifier.from_artifacts(
                 settings.checkpoint_path,
-                cohort_path=settings.cohort_path,
                 calibrator_path=settings.calibrator_path,
                 device=None if settings.device == "auto" else settings.device,
             )
@@ -114,14 +112,13 @@ class InferenceService:
             "model_loaded": self.is_ready,
             "model_version": verifier.model_version if verifier else None,
             "checkpoint": str(self.checkpoint_path) if self.checkpoint_path else None,
-            # Whether it is *applied*, not merely loaded. The cohort file is
-            # still produced and still verified against the weights, but
-            # SCORING.cohort_normalise decides whether scoring uses it.
-            "cohort_normalisation": bool(
-                verifier and verifier.cohort is not None and verifier.cfg.cohort_normalise
+            "calibration_references": (
+                verifier.calibrator.protocol_references if verifier else 0
             ),
-            "writer_normalisation": bool(verifier and verifier.cfg.writer_normalise),
-            "calibrated": bool(verifier and not verifier.calibrator.is_placeholder),
+            "calibrator_thin_fit": bool(verifier and verifier.calibrator.thin_fit),
+            # A verifier only loads with a usable calibrator now — the service
+            # refuses rather than serving a number it cannot stand behind.
+            "calibrated": bool(verifier),
             "advisory_only": settings.advisory_only,
             "error": self.load_error,
         }
@@ -140,23 +137,16 @@ class InferenceService:
         embedding = verifier.embed_canvases([canvas])[0]
         return canvas, embedding
 
-    def enrolment_stats(self, embeddings: np.ndarray) -> CohortStats | None:
-        verifier = self._require()
-        if verifier.cohort is None:
-            return None
-        return verifier.cohort.enrolment_stats(embeddings)
+    def specimen_agreement(self, embeddings: np.ndarray) -> float:
+        """How well a customer's own specimens agree.
 
-    def enrolment_state(self, embeddings: np.ndarray) -> tuple[CohortStats | None, float]:
-        """Everything cached per customer: cohort statistics and specimen agreement.
-
-        Returned together because both are computed from the same embeddings
-        and both must be refreshed whenever the specimen set changes. The
-        cohort half is None when cohort normalisation is off — which is now the
-        default — but the specimen agreement is always available, so the
-        enrolment row is written either way. It did not used to be, and a
-        customer without one silently fell back to an unnormalised score.
+        Diagnostic only — nothing on the scoring path reads it. It detects a
+        broken enrolment (wrong customer, mis-cropped scan, two different
+        people), which `api.doctor` surfaces. 0.0 for a single specimen, where
+        the question has no answer, which is the normal case.
         """
-        return self.enrolment_stats(embeddings), intra_reference_mean(embeddings)
+        self._require()
+        return intra_reference_mean(embeddings)
 
     # -- verification -----------------------------------------------------
 

@@ -1,110 +1,91 @@
 import type { ScoreDiagnostics } from '../api'
 
 /**
- * The arithmetic behind the score, on screen.
+ * How the similarity became this score, on screen.
  *
- * A score is a similarity minus a baseline, clipped by a floor, pushed through
- * a calibration curve. When one of those stages misbehaves the number looks
- * arbitrary and there is nothing on the panel to argue with. This shows the
- * whole chain, with the step that decided the outcome marked.
+ * The whole chain is now two steps — cosine to the stored specimen, then a
+ * calibration curve — so this is short by design. It used to be long because
+ * the chain was: subtract a baseline whose source varied, clip by a floor,
+ * then calibrate, with the score depending on which of those bound. Every
+ * number here can be checked against the one beside it.
  *
  * Collapsed by default: an operator at a counter does not need it, and the
- * person debugging a surprising score needs all of it.
+ * person investigating a surprising score needs all of it.
  */
 
 const pct = (v: number) => `${(v * 100).toFixed(1)}%`
-const signed = (v: number) => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%`
-
-function baselineLabel(source: string): string {
-  if (source === 'own') return 'this customer’s own specimens'
-  if (source === 'population') return 'a typical customer (only one specimen on file)'
-  return 'none — the score has no per-customer baseline'
-}
 
 export function ScoreBreakdown({ diagnostics: d }: { diagnostics: ScoreDiagnostics }) {
-  const clampedHigh = d.calibrator_clamped === 'above'
-  const clampedLow = d.calibrator_clamped === 'below'
+  const clamped = d.calibrator_clamped
 
   return (
-    <>
-      {/* The one condition that invalidates everything else on the panel. */}
-      {d.inconsistent && (
-        <p className="alert alert--danger">
-          <strong>This score is not trustworthy.</strong> The signature matches at{' '}
-          {pct(d.combined_similarity)}, below the {pct(d.similarity_floor)} that genuine
-          signatures reach on this model — yet the score is {d.normalised >= 0 ? 'high' : 'high'}.
-          Do not act on it. Send this breakdown to whoever maintains the system.
+    <details className="breakdown">
+      <summary>Score breakdown</summary>
+
+      <dl className="breakdown__rows">
+        <div className="is-binding">
+          <dt>Matched the stored specimen at</dt>
+          <dd>{pct(d.similarity)}</dd>
+        </div>
+        <div>
+          <dt>Which the calibration curve reads as</dt>
+          <dd>
+            {d.score.toFixed(0)} / 100
+            <span className="breakdown__note">
+              fitted on {d.calibrator_fit_samples[0]} genuine and{' '}
+              {d.calibrator_fit_samples[1]} forged comparisons, at{' '}
+              {d.protocol_references} specimen(s) per customer
+            </span>
+          </dd>
+        </div>
+        <div>
+          <dt>Bands</dt>
+          <dd>
+            green from {d.green_min.toFixed(0)}, red at or below {d.red_max.toFixed(0)}
+            <span className="breakdown__note">
+              {d.green_max_far != null
+                ? `set so at most ${pct(d.green_max_far)} of forgeries reach green`
+                : 'configured default, not derived from measurement'}
+            </span>
+          </dd>
+        </div>
+        {d.genuine_share_at_or_above != null && (
+          <div>
+            <dt>Signatures matching at least this well</dt>
+            <dd>
+              {pct(d.genuine_share_at_or_above)} of genuine
+              {d.impostor_share_at_or_above != null && (
+                <>, {pct(d.impostor_share_at_or_above)} of forgeries</>
+              )}
+              <span className="breakdown__note">measured on held-out signers</span>
+            </dd>
+          </div>
+        )}
+      </dl>
+
+      {/* Saturation is what makes every score look identical, so it is stated
+          rather than left to be inferred from a number that looks fine. */}
+      {clamped && (
+        <p className="alert alert--warn">
+          A similarity of {pct(d.similarity)} falls {clamped} the range the curve was
+          fitted over ({pct(d.calibrator_domain[0])} to {pct(d.calibrator_domain[1])}), so
+          the score was clamped to the {clamped === 'above' ? 'top' : 'bottom'} of the
+          scale. Scores here cannot distinguish one signature from another.
         </p>
       )}
 
-      <details className="breakdown">
-        <summary>Score breakdown</summary>
-
-        <dl className="breakdown__rows">
-          <div>
-            <dt>Similarity to the specimens</dt>
-            <dd>{pct(d.combined_similarity)}</dd>
-          </div>
-          <div>
-            <dt>Baseline subtracted</dt>
-            <dd>
-              {pct(d.baseline)}
-              <span className="breakdown__note">{baselineLabel(d.baseline_source)}</span>
-            </dd>
-          </div>
-          <div className={!d.floor_applied && d.baseline_source !== 'none' ? 'is-binding' : ''}>
-            <dt>Margin against that baseline</dt>
-            <dd>{signed(d.relative_margin)}</dd>
-          </div>
-          <div className={d.floor_applied ? 'is-binding' : ''}>
-            <dt>Margin against the floor</dt>
-            <dd>
-              {signed(d.absolute_margin)}
-              <span className="breakdown__note">
-                floor {pct(d.similarity_floor)},{' '}
-                {d.floor_measured ? 'measured on this corpus' : 'configured default'}
-              </span>
-            </dd>
-          </div>
-          <div>
-            <dt>Score is decided by</dt>
-            <dd>
-              {d.binding_term}
-              <span className="breakdown__note">
-                {d.baseline_source === 'none'
-                  ? 'with no baseline the value is not on the calibration scale at all'
-                  : 'whichever of the two is stricter'}
-              </span>
-            </dd>
-          </div>
-        </dl>
-
-        {/* Saturation is the failure that makes every score look identical, so
-            it gets stated rather than left to be inferred from the numbers. */}
-        {(clampedHigh || clampedLow) && (
-          <p className="alert alert--warn">
-            The value {signed(d.normalised)} falls {clampedHigh ? 'above' : 'below'} the
-            calibration curve’s range ({signed(d.calibrator_domain[0])} to{' '}
-            {signed(d.calibrator_domain[1])}), so it was clamped to the{' '}
-            {clampedHigh ? 'top' : 'bottom'} of the scale. Scores in this region cannot
-            distinguish one signature from another — recalibrate before relying on them.
-          </p>
-        )}
-
-        <p className="breakdown__footer">
-          Calibration: {d.calibrator_distinct_scores} distinct scores available, fitted on{' '}
-          {d.calibrator_fit_samples[0]} genuine / {d.calibrator_fit_samples[1]} impostor
-          comparisons.
-          {d.calibrator_fit_samples[0] < 200 && (
-            <>
-              {' '}
-              That is a thin fit — below roughly 200 of each the curve collapses into a few
-              coarse steps and stops discriminating near the top of its range.
-            </>
-          )}{' '}
-          Model {d.model_version}.
+      {d.calibrator_thin_fit && (
+        <p className="alert alert--warn">
+          The calibration curve was fitted on fewer than 200 comparisons per class, so it
+          is coarse and its ceiling is conservative. Widening the validation set — more
+          signers, not more samples per signer — is what improves it.
         </p>
-      </details>
-    </>
+      )}
+
+      <p className="breakdown__footer">
+        {d.calibrator_distinct_scores} distinct scores available on this curve. Model{' '}
+        {d.model_version}.
+      </p>
+    </details>
   )
 }

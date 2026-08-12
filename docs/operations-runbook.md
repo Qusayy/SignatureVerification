@@ -35,13 +35,20 @@ empty `warnings` array in production.
 
 ### Model artifacts
 
-Three files must be present and consistent with each other:
+Two files must be present and consistent with each other:
 
 | File | Produced by | Consequence if missing |
 |---|---|---|
-| `artifacts/<arch>_track_b.pt` | `ml/embed/train.py` | Service starts degraded; verification returns 503 |
-| `artifacts/cohort.npz` | `ml/eval/benchmark.py` | Scores are not comparable across customers; responses flagged `no_cohort_normalisation` |
-| `artifacts/calibrator.json` | `ml/eval/benchmark.py` | Scores are placeholders; the UI shows "uncalibrated" and hides the number |
+| `artifacts/<arch>_track_b.pt` | `ml/embed/train.py` | Service refuses to start |
+| `artifacts/calibrator.json` | `ml/eval/benchmark.py` | Service refuses to start — a similarity cannot become a confidence without it |
+
+Both are checked at load: the calibrator carries the weights that produced it
+and the number of specimens it was fitted for, and a mismatch on either stops
+the service rather than producing plausible, wrong numbers.
+
+`artifacts/cohort.npz` is still written but no longer loaded. Cohort
+normalisation left the serving path — it cost 15.7 EER points, because it
+answers the random-impostor question, which is already solved at 0.00%.
 
 Gate the checkpoint before deploying:
 
@@ -51,6 +58,24 @@ python -m ml.embed.provenance artifacts/signet_track_b.pt --gate
 
 Non-zero exit means the weight was trained on non-commercial data or from a
 licence-encumbered initialisation. Do not deploy it. See `docs/licensing.md`.
+
+### The scoring chain, in one place
+
+Similarity to the nearest stored specimen, then a calibration curve. That is
+all of it. If a score looks wrong, `python -m api.explain --customer C1001
+--image query.png` prints every quantity between the pixels and the number, and
+the same figures are in the interface under "Score breakdown".
+
+The curve is fitted for a specific number of stored specimens
+(`SCORING.calibration_references`, currently 1) and the service refuses to load
+one fitted for a different number. That guard exists because every score the
+system produced before it was a value from one protocol pushed through a scale
+built for another.
+
+Band edges are derived from FAR/FRR targets on validation and stored in the
+calibrator, not fixed in config. To move them, change `green_max_far` /
+`red_max_frr` and re-run the benchmark — the report prints the band mix that
+results, which is the number risk signs off.
 
 ### Training for single-specimen customers
 
@@ -102,8 +127,8 @@ complexity on that evidence; revisit if a better augmentation model exists.
 
 ### Retraining checklist
 
-Order matters, because `ml.eval.benchmark` always writes `artifacts/cohort.npz`
-and `artifacts/calibrator.json` — for whichever checkpoint it was pointed at.
+Order matters, because `ml.eval.benchmark` always writes
+`artifacts/calibrator.json` — for whichever checkpoint it was pointed at.
 Benchmark the checkpoint you intend to **serve**, and benchmark it last.
 
 ```bash
@@ -115,8 +140,8 @@ rm -rf data/cache
 # 2. Train.
 python -m ml.embed.train --arch signet --track b --manifest data/manifest_real.json ...
 
-# 3. Benchmark. This regenerates the cohort and calibrator, stamped with the
-#    weights that produced them, and writes the accuracy report.
+# 3. Benchmark. This fits the calibrator at the served protocol, derives the
+#    band edges, stamps both with the weights, and writes the accuracy report.
 python -m ml.eval.benchmark --checkpoint artifacts/<new>.pt --split test --by-script
 
 # 4. Point the service at it (in .env, which does not travel with the repo).
@@ -125,15 +150,16 @@ python -m ml.eval.benchmark --checkpoint artifacts/<new>.pt --split test --by-sc
 # 5. Re-embed every stored specimen, or rebuild the demo outright.
 python -m api.reenrol --check && python -m api.reenrol --apply
 #    or, if the schema also changed:
-python -m api.seed --reset --manifest data/manifest_real.json --customers 10 --references 3
+python -m api.seed --reset --manifest data/manifest_real.json --customers 10 --references 1
 
 # 6. Confirm before serving.
 python -m api.doctor
 ```
 
-Skipping step 3 no longer produces wrong numbers — the service refuses to pair
-a cohort or calibrator with weights that did not produce it — but it does mean
-the service will not start until you run it.
+Skipping step 3 no longer produces wrong numbers — the service refuses a
+calibrator that does not belong to these weights, or that was fitted for a
+different number of specimens — but it does mean the service will not start
+until you run it.
 
 ### Re-enrolment after a model change
 
@@ -149,7 +175,7 @@ a model change.
 After any change to either:
 
 ```bash
-# 1. Regenerate the cohort and calibrator for the new model
+# 1. Regenerate the calibrator for the new model
 python -m ml.eval.benchmark --checkpoint artifacts/<new>.pt --split test
 
 # 2. Point the service at the new checkpoint, then re-embed every specimen
@@ -214,10 +240,11 @@ that differ. Production should be on Alembic, which this POC is not.
 
 **Scores look plausible but every forgery passes**
 
-The likeliest cause is that `cohort.npz` and `calibrator.json` were produced by
-a *different checkpoint* than the one being served. Both are functions of a
-specific embedding space; paired with other weights they produce numbers in an
-entirely normal range that mean nothing.
+The likeliest cause is that `calibrator.json` was produced by a *different
+checkpoint* than the one being served, or fitted for a different number of
+stored specimens. The curve is a function of a specific embedding space and a
+specific protocol; paired with either wrong, it produces numbers in an entirely
+normal range that mean nothing.
 
 This shipped once. Two thirds of skilled forgeries scored 99.5 out of 100, and
 the demo looked like a system working perfectly. Nothing caught it because
@@ -234,8 +261,8 @@ python -m ml.eval.benchmark --checkpoint <the checkpoint you serve> --split test
 python -m api.reenrol --apply
 ```
 
-Always regenerate the cohort and calibrator **together**, from the checkpoint
-you intend to serve. They are a matched set of three.
+Always regenerate the calibrator from the checkpoint you intend to serve. The
+checkpoint and its curve are a matched pair, and the service checks it.
 
 **"Could not decrypt … the image encryption key has changed"**
 `SV_IMAGE_ENCRYPTION_KEY` differs from the one used at enrolment. Restore the

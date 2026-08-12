@@ -128,13 +128,10 @@ def seed_customers(
                 )
             )
 
-        stats, reference_mean = service.enrolment_state(np.vstack(embeddings))
         session.add(
             CustomerEnrolment(
                 customer_id=customer.id,
-                cohort_mean=stats.mean if stats else 0.0,
-                cohort_std=stats.std if stats else 0.0,
-                intra_reference_mean=reference_mean,
+                intra_reference_mean=service.specimen_agreement(np.vstack(embeddings)),
                 n_references=len(embeddings),
                 model_version=service.verifier.model_version if service.verifier else "",
             )
@@ -166,7 +163,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Seed the demo database")
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST_PATH)
     parser.add_argument("--customers", type=int, default=12)
-    parser.add_argument("--references", type=int, default=3)
+    parser.add_argument(
+        "--references",
+        type=int,
+        default=1,
+        help=(
+            "Specimens per customer. Defaults to 1 because that is the deployed "
+            "protocol; anything else demonstrates a system nobody runs."
+        ),
+    )
     parser.add_argument(
         "--split",
         default="test",

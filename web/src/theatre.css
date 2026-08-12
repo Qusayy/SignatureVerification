@@ -584,3 +584,26 @@
 .breakdown .alert {
   margin: 0.6rem 0.85rem;
 }
+
+/* Band ticks on the gauge. Without them a score is a bare number; with them it
+   is visibly just under, or well over, the threshold that matters. */
+.gauge__tick {
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  opacity: 0.85;
+}
+
+.gauge__tick--green {
+  stroke: var(--green);
+}
+
+.gauge__tick--red {
+  stroke: var(--red);
+}
+
+.gauge__edges {
+  margin-top: 0.3rem;
+  font-size: 0.7rem;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}

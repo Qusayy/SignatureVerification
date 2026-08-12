@@ -131,7 +131,7 @@ def test_reenrolled_scores_stay_sane(client, auth, signatures):
             files={"file": as_upload(image)},
         )
         assert response.status_code == 200, response.text
-        return response.json()["comparison"]["raw"]
+        return response.json()["comparison"]["similarity"]
 
     before = score(signatures["genuine"][3])
 

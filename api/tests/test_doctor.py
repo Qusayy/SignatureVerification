@@ -240,16 +240,15 @@ def test_model_version_identifies_weights_not_the_commit():
     assert "unknown" not in weights_id(first)
 
 
-def test_doctor_flags_a_cohort_from_another_run(tmp_path, monkeypatch):
+def test_doctor_flags_a_calibrator_from_another_run(tmp_path, monkeypatch):
     """The check `api/doctor.py`'s docstring promised and did not implement."""
-    import numpy as np
     import torch
 
     from api import doctor as doctor_module
     from api.doctor import FAIL, Report, check_artifacts
     from ml.embed.models import build_model
     from ml.embed.provenance import weights_id
-    from ml.scoring.znorm import CohortNormalizer
+    from ml.scoring.calibrate import ScoreCalibrator
 
     state = build_model("signet").state_dict()
     checkpoint = tmp_path / "model.pt"
@@ -266,19 +265,19 @@ def test_doctor_flags_a_cohort_from_another_run(tmp_path, monkeypatch):
     )
 
     rng = np.random.default_rng(0)
-    vectors = rng.normal(size=(120, 512))
-    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
-    CohortNormalizer(vectors, [f"s{i}" for i in range(120)]).save(
-        tmp_path / "cohort.npz", weights_id="0000000000000000"
-    )
+    ScoreCalibrator.fit(
+        rng.normal(0.93, 0.025, 400),
+        rng.normal(0.85, 0.045, 400),
+        protocol_references=1,
+        weights_id="0000000000000000",
+    ).save(tmp_path / "calibrator.json")
 
     monkeypatch.setattr(
         doctor_module,
         "get_settings",
         lambda: Settings(
             checkpoint_path=checkpoint,
-            cohort_path=tmp_path / "cohort.npz",
-            calibrator_path=tmp_path / "absent.json",
+            calibrator_path=tmp_path / "calibrator.json",
             dev_key_path=tmp_path / "k",
         ),
     )
@@ -287,6 +286,6 @@ def test_doctor_flags_a_cohort_from_another_run(tmp_path, monkeypatch):
     check_artifacts(report)
 
     failure = next(c for c in report.checks if c.status == FAIL)
-    assert "cohort" in failure.name
+    assert "calibrator" in failure.name
     assert "0000000000000000" in failure.detail
     assert any("benchmark" in line for line in failure.fix)

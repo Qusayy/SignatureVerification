@@ -37,7 +37,6 @@ from api.services.inference import ModelNotLoaded, get_service
 from api.services.storage import get_store
 from ml.preprocess.pipeline import BlankSignatureError
 from ml.scoring.verifier import EnrolmentBundle
-from ml.scoring.znorm import CohortStats
 
 router = APIRouter(prefix="/api/verify", tags=["verification"])
 
@@ -54,24 +53,29 @@ def _stage_url(store, customer_id: str, key: str, image, invert: bool) -> str:
     return f"/api/images/{stored}" + ("?invert=1" if invert else "")
 
 
-def _load_enrolment(session: Session, customer: Customer, store) -> EnrolmentBundle:
+def _load_enrolment(session: Session, customer: Customer, store, service) -> EnrolmentBundle:
     if not customer.references:
         raise HTTPException(
             status.HTTP_409_CONFLICT,
             f"Customer {customer.customer_number} has no specimen signature on file. "
-            "Enrol at least one before verifying.",
+            "Enrol one before verifying.",
+        )
+
+    # Embeddings are model-specific. Scoring a query against embeddings from an
+    # older model produces a number in the normal range that means nothing —
+    # the canonical confident-and-wrong failure. It used to be only a warning in
+    # `api.doctor`; refusing is the only response that cannot be ignored.
+    current = service.verifier.model_version if service.verifier else ""
+    stored = customer.enrolment.model_version if customer.enrolment else ""
+    if current and stored and stored != current:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            f"Customer {customer.customer_number} was enrolled under model {stored} but "
+            f"the service runs {current}. Scores against stale embeddings look normal "
+            "and are meaningless. Re-embed first: python -m api.reenrol --apply",
         )
 
     embeddings = np.asarray([r.embedding for r in customer.references], dtype=np.float64)
-    stats = None
-    reference_mean = None
-    if customer.enrolment:
-        if customer.enrolment.cohort_std:
-            stats = CohortStats(customer.enrolment.cohort_mean, customer.enrolment.cohort_std)
-        # A stored 0.0 means "never computed" — an enrolment written before this
-        # was cached. Falling back to None recomputes it rather than silently
-        # scoring as though the customer's specimens agreed perfectly.
-        reference_mean = customer.enrolment.intra_reference_mean or None
 
     canvases = []
     for reference in customer.references:
@@ -86,9 +90,7 @@ def _load_enrolment(session: Session, customer: Customer, store) -> EnrolmentBun
     return EnrolmentBundle(
         signer_id=customer.customer_number,
         embeddings=embeddings,
-        cohort_stats=stats,
         canvases=canvases,
-        reference_mean=reference_mean,
     )
 
 
@@ -125,7 +127,7 @@ async def verify_signature(
     store = get_store()
     service = get_service()
     image = await read_upload(file)
-    enrolment = _load_enrolment(session, customer, store)
+    enrolment = _load_enrolment(session, customer, store, service)
 
     bbox = None
     if None not in (bbox_x, bbox_y, bbox_width, bbox_height):

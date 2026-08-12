@@ -77,54 +77,55 @@ class DetectionOut(BaseModel):
 
 
 class ComparisonOut(BaseModel):
-    # NOTE: `raw` is not a similarity. When writer normalisation applies it is
-    # the combined similarity minus `intra_reference_mean`, so it sits near
-    # zero for a genuine signature and goes negative for one less consistent
-    # than the customer's own specimens. The similarities are reported
-    # alongside it precisely because the two are easy to confuse.
-    raw: float
+    """What the query scored against the stored specimen.
+
+    ``similarity`` is the cosine the calibration curve reads, and is also what
+    the interface shows as "Matched at 91.3%" — so the chain from pixels to
+    score is checkable by eye. ``scoring_version`` distinguishes these rows from
+    pre-rework ones in the audit trail, which stored a writer-normalised margin
+    under a different name.
+    """
+
+    similarity: float
     max_similarity: float
     mean_similarity: float
     min_similarity: float
     per_reference: list[float]
     n_references: int
     single_reference: bool
-    # The baseline `raw` is measured against. Without it a client cannot
-    # explain why an 89% match scored 50, and the panel reads as broken.
-    intra_reference_mean: float = 0.0
-    writer_normalised: bool = False
-    # "own" | "population" | "none" — which baseline produced `raw`. A client
-    # must not present a population baseline as though it measured this
-    # customer.
-    baseline_source: str = "none"
-    specimens_disagree: bool = False
+    scoring_version: int = 2
 
 
 class ScoreDiagnosticsOut(BaseModel):
-    """The arithmetic between the similarity and the number on screen.
+    """How the similarity became this score and this band.
 
-    Shown in the interface rather than hidden behind a CLI, because the people
-    who hit a surprising score are looking at a browser. `inconsistent` is the
-    one field to react to: it means a similarity no genuine signature reaches
-    produced a confident score, and nothing else on the panel can be trusted.
+    Shown in the interface rather than behind a CLI, because the people who hit
+    a surprising score are looking at a browser. Every field is checkable
+    against the number beside it.
     """
 
-    combined_similarity: float
-    baseline: float
-    baseline_source: str
-    similarity_floor: float
-    floor_measured: bool
-    relative_margin: float
-    absolute_margin: float
-    binding_term: str
-    floor_applied: bool = False
-    normalised: float
+    similarity: float
+    score: float
+    band: str
+    # Band edges, derived from operating points on validation rather than fixed:
+    # the 0-100 score is a probability under the benchmark's genuine/impostor
+    # mix, not the base rate at a counter, so a fixed edge has no operational
+    # meaning. FAR and FRR are conditional on class and therefore stable.
+    green_min: float
+    red_max: float
+    green_max_far: float | None = None
+    red_max_frr: float | None = None
+    # Share of each population reaching this similarity, so the panel can put
+    # the number in context rather than leaving it bare.
+    genuine_share_at_or_above: float | None = None
+    impostor_share_at_or_above: float | None = None
     calibrator_domain: list[float]
     calibrator_clamped: str | None = None
     calibrator_distinct_scores: int
     calibrator_fit_samples: list[int]
+    calibrator_thin_fit: bool = False
+    protocol_references: int = 1
     model_version: str = ""
-    inconsistent: bool = False
 
 
 class PipelineStageOut(BaseModel):
@@ -221,8 +222,8 @@ class HealthOut(BaseModel):
     status: str
     model_loaded: bool
     model_version: str | None
-    cohort_normalisation: bool
-    writer_normalisation: bool = False
+    calibration_references: int = 1
+    calibrator_thin_fit: bool = False
     calibrated: bool
     advisory_only: bool
     warnings: list[str]

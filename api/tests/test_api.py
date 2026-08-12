@@ -72,6 +72,8 @@ def test_duplicate_customer_number_is_rejected(client, auth):
 
 
 def test_enrolment_stores_specimens_and_embeddings(client, auth, signatures):
+    # Three here on purpose: enrolment must handle a multi-file upload even
+    # though production stores one specimen per customer.
     _create_customer(client, auth)
     body = _enrol(client, auth, "C001", signatures["genuine"][:3])
     assert body["n_references"] == 3
@@ -117,7 +119,7 @@ def test_verification_without_specimens_is_refused(client, auth, signatures):
 
 def test_verification_returns_an_advisory_result(client, auth, signatures):
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     response = client.post(
         "/api/verify",
@@ -131,8 +133,8 @@ def test_verification_returns_an_advisory_result(client, auth, signatures):
     assert body["advisory_only"] is True
     assert 0 <= body["score"] <= 100
     assert body["band"] in {"green", "amber", "red"}
-    assert body["comparison"]["n_references"] == 3
-    assert len(body["comparison"]["per_reference"]) == 3
+    assert body["comparison"]["n_references"] == 1
+    assert len(body["comparison"]["per_reference"]) == 1
     assert body["reason"]
     assert body["crop_url"] and body["overlay_url"]
     # No field anywhere claims the system reached a verdict.
@@ -143,7 +145,7 @@ def test_verification_returns_an_advisory_result(client, auth, signatures):
 def test_genuine_signature_scores_above_a_different_writer(client, auth, signatures):
     """The core sanity check: the model must at least separate different people."""
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     def score(image):
         response = client.post(
@@ -153,7 +155,7 @@ def test_genuine_signature_scores_above_a_different_writer(client, auth, signatu
             files={"file": as_upload(image)},
         )
         assert response.status_code == 200, response.text
-        return response.json()["comparison"]["raw"]
+        return response.json()["comparison"]["similarity"]
 
     assert score(signatures["genuine"][3]) > score(signatures["other_writer"])
 
@@ -161,7 +163,7 @@ def test_genuine_signature_scores_above_a_different_writer(client, auth, signatu
 def test_blank_capture_is_refused_rather_than_scored(client, auth, signatures):
     """A blank crop must produce an error, never a confident-looking low score."""
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     blank = np.full((300, 600), 250, dtype=np.uint8)
     response = client.post(
@@ -174,26 +176,34 @@ def test_blank_capture_is_refused_rather_than_scored(client, auth, signatures):
     assert "rescan" in response.json()["detail"].lower()
 
 
-def test_single_specimen_lowers_stated_confidence(client, auth, signatures):
+def test_single_specimen_is_scored_without_caveats(client, auth, signatures):
+    """One specimen is the deployed protocol, not a degraded case.
+
+    The response used to carry `single_reference_lower_confidence` on every
+    verification, since every customer has one specimen. A warning that always
+    fires tells an operator nothing they can act on.
+    """
     _create_customer(client, auth)
     _enrol(client, auth, "C001", signatures["genuine"][:1])
 
-    response = client.post(
+    body = client.post(
         "/api/verify",
         headers=auth,
         data={"customer_number": "C001", "is_full_page": "false"},
-        files={"file": as_upload(signatures["genuine"][2])},
-    )
-    body = response.json()
+        files={"file": as_upload(signatures["genuine"][3])},
+    ).json()
+
     assert body["comparison"]["single_reference"] is True
-    assert "single_reference_lower_confidence" in body["warnings"]
+    assert 0 <= body["score"] <= 100
+    assert body["calibrated"] is True
+    assert not [w for w in body["warnings"] if "specimen" in w or "scale" in w]
 
 
 def test_full_page_detection_finds_the_signature(client, auth, signatures):
     from ml.data.synth import render_on_form
 
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     page, _bbox = render_on_form(signatures["genuine"][3], np.random.default_rng(9))
     response = client.post(
@@ -213,7 +223,7 @@ def test_employee_supplied_bbox_overrides_detection(client, auth, signatures):
     from ml.data.synth import render_on_form
 
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     page, bbox = render_on_form(signatures["genuine"][3], np.random.default_rng(11))
     x, y, w, h = bbox
@@ -274,7 +284,7 @@ def _verify(client, auth, image, number="C001"):
 
 def test_decision_is_recorded_and_appears_in_the_audit_log(client, auth, signatures):
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
     result = _verify(client, auth, signatures["genuine"][3])
 
     response = client.post(
@@ -292,7 +302,7 @@ def test_decision_is_recorded_and_appears_in_the_audit_log(client, auth, signatu
 
 def test_audit_trail_is_append_only(client, auth, signatures):
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
     result = _verify(client, auth, signatures["genuine"][3])
 
     first = client.post(
@@ -309,7 +319,7 @@ def test_audit_trail_is_append_only(client, auth, signatures):
 
 def test_agreement_summary_excludes_amber(client, auth, signatures):
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
     result = _verify(client, auth, signatures["genuine"][3])
     client.post(
         f"/api/verify/{result['event_id']}/decision", headers=auth, json={"decision": "accept"}
@@ -355,7 +365,7 @@ def test_verification_is_durable_before_the_response_is_returned(client, auth, s
             session.close()
 
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     app.dependency_overrides[get_session] = session_without_teardown_commit
     try:
@@ -415,7 +425,7 @@ def test_missing_images_are_404(client, auth, missing):
 def test_verification_returns_the_pipeline_trace(client, auth, signatures):
     """The explanation must be the real computation, not a reconstruction."""
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     body = client.post(
         "/api/verify",
@@ -437,7 +447,8 @@ def test_verification_returns_the_pipeline_trace(client, auth, signatures):
         "model_input",
         "embedding",
         "compare",
-        "cohort",
+        # No "cohort" stage: there is no baseline to subtract any more. The
+        # chain is similarity, then calibration.
         "calibration",
         "overlay",
     ]
@@ -447,7 +458,7 @@ def test_verification_returns_the_pipeline_trace(client, auth, signatures):
 def test_trace_is_opt_out(client, auth, signatures):
     """A caller that only wants the number should not pay for a dozen PNGs."""
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     body = client.post(
         "/api/verify",
@@ -462,7 +473,7 @@ def test_trace_is_opt_out(client, auth, signatures):
 def test_trace_does_not_change_the_score(client, auth, signatures):
     """Tracing is observational. If it moved the score it would be a defect."""
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     def score(explain: str) -> float:
         return client.post(
@@ -479,7 +490,7 @@ def test_trace_images_are_served_through_the_encrypted_store(client, auth, signa
     """Stage images are derived from a biometric image and are just as
     identifying as the original, so they get the same protection."""
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     body = client.post(
         "/api/verify",
@@ -503,7 +514,7 @@ def test_trace_images_are_served_through_the_encrypted_store(client, auth, signa
 
 def test_scoring_stages_carry_the_numbers_behind_the_result(client, auth, signatures):
     _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
 
     body = client.post(
         "/api/verify",
@@ -516,7 +527,7 @@ def test_scoring_stages_carry_the_numbers_behind_the_result(client, auth, signat
     compare = stages["compare"]
     assert compare["kind"] == "compare"
     assert compare["image_url"] is None
-    assert len(compare["metrics"]["per_reference"]) == 3
+    assert len(compare["metrics"]["per_reference"]) == 1
 
     calibration = stages["calibration"]
     assert calibration["kind"] == "score"
@@ -525,44 +536,8 @@ def test_scoring_stages_carry_the_numbers_behind_the_result(client, auth, signat
     assert calibration["metrics"]["band"] == body["band"]
 
 
-def test_comparison_reports_the_baseline_the_score_is_measured_against(
-    client, auth, signatures
-):
-    """A client cannot explain the score without it.
-
-    `raw` is the combined similarity minus the customer's own specimen
-    agreement, so an 89% match against specimens that agree at 88.5% scores
-    near the middle of the range. Reporting only the similarities makes that
-    look like a defect.
-    """
-    _create_customer(client, auth)
-    _enrol(client, auth, "C001", signatures["genuine"][:3])
-
-    body = client.post(
-        "/api/verify",
-        headers=auth,
-        data={"customer_number": "C001", "is_full_page": "false"},
-        files={"file": as_upload(signatures["genuine"][3])},
-    ).json()
-
-    comparison = body["comparison"]
-    assert comparison["writer_normalised"] is True
-    assert 0.0 < comparison["intra_reference_mean"] <= 1.0
-    # raw is the margin, not the similarity — the arithmetic must reconcile.
-    combined = 0.5 * comparison["max_similarity"] + 0.5 * comparison["mean_similarity"]
-    assert comparison["raw"] == pytest.approx(
-        combined - comparison["intra_reference_mean"], abs=1e-4
-    )
-
-
-def test_single_specimen_falls_back_to_the_population_baseline(client, auth, signatures):
-    """The configuration most deployments are actually in.
-
-    One specimen means the customer's own consistency cannot be measured. With
-    no substitute, `raw` came through as a bare similarity of ~0.9 into a
-    calibrator whose domain ends near +0.04, so it clipped to the ceiling and
-    *every* single-specimen verification returned ~100 — forgeries included.
-    """
+def test_the_comparison_reports_the_similarity_the_score_came_from(client, auth, signatures):
+    """The chain from pixels to score must be checkable from the response."""
     _create_customer(client, auth)
     _enrol(client, auth, "C001", signatures["genuine"][:1])
 
@@ -574,32 +549,62 @@ def test_single_specimen_falls_back_to_the_population_baseline(client, auth, sig
     ).json()
 
     comparison = body["comparison"]
-    assert comparison["baseline_source"] == "population"
-    assert comparison["writer_normalised"] is False, "a population median is not this customer"
-    assert comparison["intra_reference_mean"] > 0.5
-    # The margin, not the similarity: well inside the calibrated range.
-    assert comparison["raw"] < 0.5
-    assert "score_uses_population_baseline" in body["warnings"]
+    assert comparison["scoring_version"] == 2
+    assert -1.0 <= comparison["similarity"] <= 1.0
+    # With one specimen the pooled statistics collapse to the same number.
+    assert comparison["similarity"] == pytest.approx(comparison["max_similarity"])
+
+    diagnostics = body["diagnostics"]
+    assert diagnostics["similarity"] == pytest.approx(comparison["similarity"])
+    assert diagnostics["protocol_references"] == 1
+    assert diagnostics["green_min"] > diagnostics["red_max"]
 
 
-def test_a_poor_single_specimen_match_does_not_score_full_marks(client, auth, signatures):
-    """The regression, stated as the operator would see it."""
+def test_a_stale_enrolment_is_refused_rather_than_scored(client, auth, signatures):
+    """Embeddings are model-specific.
+
+    Scoring against embeddings from an older model produces a number in the
+    normal range that means nothing. It used to be a warning in `api.doctor`
+    only; refusing is the one response that cannot be ignored.
+    """
+    from api.db import get_sessionmaker
+    from api.models.tables import CustomerEnrolment
+
     _create_customer(client, auth)
     _enrol(client, auth, "C001", signatures["genuine"][:1])
 
-    def score(image) -> float:
-        return client.post(
-            "/api/verify",
-            headers=auth,
-            data={"customer_number": "C001", "is_full_page": "false"},
-            files={"file": as_upload(image)},
-        ).json()["score"]
+    session = get_sessionmaker()()
+    try:
+        enrolment = session.query(CustomerEnrolment).one()
+        enrolment.model_version = "signet@someothermodel"
+        session.commit()
+    finally:
+        session.close()
 
-    genuine = score(signatures["genuine"][3])
-    stranger = score(signatures["other_writer"])
-
-    assert not (genuine >= 99 and stranger >= 99), (
-        "a genuine signature and a different writer's both scored full marks against a "
-        "single specimen — the score is saturated, not discriminating"
+    response = client.post(
+        "/api/verify",
+        headers=auth,
+        data={"customer_number": "C001", "is_full_page": "false"},
+        files={"file": as_upload(signatures["genuine"][3])},
     )
-    assert stranger < genuine
+    assert response.status_code == 409
+    assert "reenrol" in response.json()["detail"]
+
+
+def test_the_photocopy_check_still_fires(client, auth, signatures):
+    """It used to require a calibrated score of 99, which stopped being
+    reachable once the ceiling became honest — a fraud control disabled by an
+    unrelated improvement. It is now a similarity threshold."""
+    _create_customer(client, auth)
+    _enrol(client, auth, "C001", signatures["genuine"][:1])
+
+    # Re-presenting the stored specimen itself is the attack.
+    body = client.post(
+        "/api/verify",
+        headers=auth,
+        data={"customer_number": "C001", "is_full_page": "false"},
+        files={"file": as_upload(signatures["genuine"][0])},
+    ).json()
+
+    assert body["suspected_copy"] is True
+    assert "suspected_photocopy_of_stored_specimen" in body["warnings"]

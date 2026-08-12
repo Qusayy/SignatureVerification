@@ -14,30 +14,15 @@ export interface Employee {
 }
 
 export interface Comparison {
-  /**
-   * The score the decision is made on. Note this is NOT the similarity: when
-   * writer normalisation applies it is the similarity minus
-   * `intra_reference_mean`, so it sits near zero for a genuine signature and
-   * goes negative for one less consistent than the customer's own specimens.
-   */
-  raw: number
+  /** Cosine to the nearest stored specimen. What the calibration curve reads. */
+  similarity: number
   max_similarity: number
   mean_similarity: number
   min_similarity: number
   per_reference: number[]
   n_references: number
   single_reference: boolean
-  /** The baseline subtracted from the similarity to produce `raw`. */
-  intra_reference_mean: number
-  writer_normalised: boolean
-  /**
-   * Where that baseline came from. `population` means the customer has one
-   * specimen, so their own consistency could not be measured and a corpus
-   * median stood in — a weaker basis, and it must be shown as such.
-   */
-  baseline_source: 'own' | 'population' | 'none'
-  /** The stored specimens do not resemble each other: a broken enrolment. */
-  specimens_disagree: boolean
+  scoring_version: number
 }
 
 export interface Detection {
@@ -69,22 +54,22 @@ export interface PipelineStage {
  * can be trusted.
  */
 export interface ScoreDiagnostics {
-  combined_similarity: number
-  baseline: number
-  baseline_source: string
-  similarity_floor: number
-  floor_measured: boolean
-  relative_margin: number
-  absolute_margin: number
-  binding_term: string
-  floor_applied: boolean
-  normalised: number
+  similarity: number
+  score: number
+  band: string
+  green_min: number
+  red_max: number
+  green_max_far: number | null
+  red_max_frr: number | null
+  genuine_share_at_or_above: number | null
+  impostor_share_at_or_above: number | null
   calibrator_domain: [number, number]
   calibrator_clamped: 'below' | 'above' | null
   calibrator_distinct_scores: number
   calibrator_fit_samples: [number, number]
+  calibrator_thin_fit: boolean
+  protocol_references: number
   model_version: string
-  inconsistent: boolean
 }
 
 export interface VerificationResult {
@@ -132,7 +117,8 @@ export interface Health {
   status: string
   model_loaded: boolean
   model_version: string | null
-  cohort_normalisation: boolean
+  calibration_references: number
+  calibrator_thin_fit: boolean
   calibrated: boolean
   advisory_only: boolean
   warnings: string[]

@@ -39,11 +39,7 @@ from ml.data.manifest import DEFAULT_MANIFEST_PATH, Manifest, Record, assert_no_
 from ml.embed.dataset import SignatureDataset, collate
 from ml.eval.metrics import VerificationMetrics, compute_metrics, det_curve
 from ml.scoring.calibrate import ScoreCalibrator
-from ml.scoring.compare import (
-    DEFAULT_MAX_WEIGHT,
-    compare_to_references,
-    intra_reference_mean,
-)
+from ml.scoring.compare import compare_to_references, intra_reference_mean
 from ml.scoring.znorm import CohortNormalizer
 
 __all__ = ["evaluate", "ComparisonSet"]
@@ -69,6 +65,10 @@ class ComparisonSet:
 
     def is_evaluable(self, minimum: int = 10) -> bool:
         return len(self.genuine) >= minimum and len(self.skilled_forgery) >= minimum
+
+    def is_thin(self, threshold: int = 200) -> bool:
+        """Too few comparisons for a calibration curve worth shipping."""
+        return len(self.genuine) < threshold or len(self.skilled_forgery) < threshold
 
     def add(self, population: str, value: float, writer: str) -> None:
         getattr(self, population).append(value)
@@ -130,8 +130,6 @@ def build_comparisons(
     cohort: CohortNormalizer | None,
     *,
     max_references: int | None = None,
-    writer_normalise: bool = SCORING.writer_normalise,
-    population_mean: float | None = None,
     seed: int = 1337,
 ) -> tuple[dict[str, ComparisonSet], dict]:
     """Form every genuine / skilled / random comparison in a split.
@@ -141,11 +139,10 @@ def build_comparisons(
     Queries are then scored against that writer's references.
 
     Args:
-        max_references: cap the reference set size. Pass 1 to measure the
-            single-specimen case, which is what an organisation storing one signature
-            per customer actually experiences.
-        writer_normalise: must match what the service does, or the reported
-            numbers describe a system nobody is running.
+        max_references: specimens per customer. Pass
+            ``SCORING.calibration_references`` — 1 — for the served protocol.
+            Other values exist for the sensitivity table, which measures what a
+            future multi-specimen enrolment would be worth.
     """
     rng = np.random.default_rng(seed)
 
@@ -183,33 +180,28 @@ def build_comparisons(
         queries[writer] = query_idx
 
     # Precomputed once per writer, as production does at enrolment.
+    # Diagnostic only — reported so a corpus with broken enrolments is visible,
+    # never used in scoring. See ml/scoring/compare.py.
     reference_means = {w: intra_reference_mean(r) for w, r in references.items()}
 
-    # The substitute for writers whose specimen agreement is unmeasurable
-    # (one specimen). Must be the value production will use, or the reported
-    # single-specimen numbers describe a different system.
-    measurable = [v for v in reference_means.values() if v > 0.0]
-    if population_mean is None:
-        population_mean = float(np.median(measurable)) if measurable else 0.0
+    def score(query_index: int, writer: str) -> float:
+        """Exactly what the service computes. No flags, by design.
 
-    genuine_similarities: list[float] = []
-
-    def score(query_index: int, writer: str, *, is_genuine: bool = False) -> float:
-        plain = compare_to_references(
-            embeddings[query_index], references[writer], writer_normalise=False
-        )
-        if is_genuine:
-            genuine_similarities.append(plain.raw)
-        raw = compare_to_references(
-            embeddings[query_index],
-            references[writer],
-            writer_normalise=writer_normalise,
-            reference_mean=reference_means[writer],
-            population_reference_mean=population_mean,
-        ).raw
+        `build_comparisons` used to take `writer_normalise`, a population mean
+        and a cohort, and `evaluate` passed different combinations to different
+        calls. That is how the harness came to measure a system nobody was
+        running: it never passed `similarity_floor`, so it used 0.60 while
+        production used 0.92, and it never passed `max_references` when fitting
+        the calibrator, so every shipped curve was built for six specimens and
+        applied to one.
+        """
+        similarity = compare_to_references(
+            embeddings[query_index], references[writer]
+        ).similarity
         if cohort is None:
-            return raw
-        return cohort.snorm(raw, embeddings[query_index], references=references[writer])
+            return similarity
+        # Retained only for the alternative-recipe table in the report.
+        return cohort.snorm(similarity, embeddings[query_index], references=references[writer])
 
     overall = ComparisonSet([], [], [])
     per_script: dict[str, ComparisonSet] = defaultdict(lambda: ComparisonSet([], [], []))
@@ -219,7 +211,7 @@ def build_comparisons(
         script = records[queries[writer][0]].script
 
         for q in queries[writer]:
-            value = score(q, writer, is_genuine=True)
+            value = score(q, writer)
             overall.add("genuine", value, writer)
             per_script[script].add("genuine", value, writer)
 
@@ -237,15 +229,12 @@ def build_comparisons(
                 overall.add("random_forgery", value, writer)
                 per_script[script].add("random_forgery", value, writer)
 
+    measurable = [v for v in reference_means.values() if v > 0.0]
     summary = {
         "writers_evaluated": len(eligible),
-        "population_reference_mean": round(population_mean, 5),
-        # The similarity below which no genuine comparison was seen. Used as an
-        # absolute backstop at scoring time, derived per corpus because the
-        # cosine scale is a property of the trained model: a constant tuned on
-        # one corpus is meaningless on another and fails silently.
-        "genuine_similarity_floor": round(
-            float(np.percentile(genuine_similarities, 1.0)) if genuine_similarities else 0.0, 5
+        "references_per_customer": max_references or "all available",
+        "specimen_agreement_median": (
+            round(float(np.median(measurable)), 5) if measurable else None
         ),
         "references_per_writer": {
             w: int(references[w].shape[0]) for w in list(eligible)[:5]
@@ -328,14 +317,61 @@ def _det_plot(populations: dict[str, ComparisonSet], path: Path) -> Path | None:
     return path
 
 
+def _band_mix(comparisons: ComparisonSet, calibrator) -> list[str]:
+    """Where genuine and forged traffic lands under the derived edges.
+
+    The operational contract, and the thing risk signs off. An EER says how
+    separable the populations are; this says what an operator sees on a normal
+    day.
+    """
+    green_min, red_max = calibrator.effective_edges()
+
+    def mix(values: list[float]) -> tuple[float, float, float]:
+        scores = np.array([calibrator.score_0_100(v) for v in values])
+        n = max(len(scores), 1)
+        return (
+            float((scores >= green_min).sum()) / n,
+            float(((scores > red_max) & (scores < green_min)).sum()) / n,
+            float((scores <= red_max).sum()) / n,
+        )
+
+    rows = [
+        "## Where the traffic lands",
+        "",
+        f"Bands from the calibrator: green from **{green_min}**, red at or below "
+        f"**{red_max}**, derived to hold FAR <= "
+        f"{calibrator.operating_points.get('green_max_far', 0):.0%} and FRR <= "
+        f"{calibrator.operating_points.get('red_max_frr', 0):.0%} on validation.",
+        "",
+        "| | Green | Amber | Red |",
+        "|---|---|---|---|",
+    ]
+    for label, values in (
+        ("Genuine signatures", comparisons.genuine),
+        ("Skilled forgeries", comparisons.skilled_forgery),
+    ):
+        g, a, r = mix(values)
+        rows.append(f"| {label} | {g:.1%} | {a:.1%} | {r:.1%} |")
+    rows += [
+        "",
+        "Amber means the operator compares manually, which is what they do for every",
+        "signature today, so amber is not a failure. Green is the only band that saves",
+        "time and red the only one that raises an alarm.",
+        "",
+    ]
+    return rows
+
+
 def build_report(
     populations: dict[str, ComparisonSet],
-    single_ref: dict[str, ComparisonSet] | None,
+    sensitivity: dict | None,
     context: dict,
     *,
     synthetic_only: bool,
     allow_synthetic_headline: bool,
     alternate: ComparisonSet | None = None,
+    calibrator=None,
+    references_per_customer: int = 1,
 ) -> str:
     lines = ["# Accuracy Report", ""]
 
@@ -362,14 +398,24 @@ def build_report(
     overall = populations.get("overall")
     if overall and overall.is_evaluable() and (allow_synthetic_headline or not synthetic_only):
         metrics = overall.metrics()
+        ci = (
+            f" (95% CI {metrics.eer_ci95[0]:.2%} - {metrics.eer_ci95[1]:.2%})"
+            if metrics.eer_ci95
+            else ""
+        )
         lines += [
-            f"**EER against skilled forgeries: {metrics.eer:.2%}**  ",
+            f"Measured at **{references_per_customer} stored specimen(s) per customer**, "
+            "which is what the service runs.",
+            "",
+            f"**EER against skilled forgeries: {metrics.eer:.2%}**{ci}  ",
             f"**TAR at FAR = 1%: {metrics.tar_at_far.get(0.01, float('nan')):.2%}**",
             "",
             "These are the two numbers to commit to. A single blended 'accuracy' figure is not",
             "reported because it hides the trade-off that risk and operations actually negotiate.",
             "",
         ]
+        if calibrator is not None:
+            lines += _band_mix(overall, calibrator)
     elif synthetic_only:
         lines += [
             "_Headline withheld: synthetic corpus. Re-run on real data, or pass",
@@ -399,52 +445,51 @@ def build_report(
     if alternate is not None and served and served.is_evaluable() and alternate.is_evaluable():
         applied = served.metrics()
         other = alternate.metrics()
-        cohort_on = bool(SCORING.cohort_normalise)
         lines += [
-            "## Cohort normalisation: applied vs not",
+            "## Alternative recipe: cohort normalisation",
             "",
-            "Both recipes, scored over the identical comparisons. The service uses the",
-            f"row marked *served*. Cohort normalisation is currently **{'on' if cohort_on else 'off'}**",
-            "(`ScoringConfig.cohort_normalise`).",
+            "Not on the serving path. Kept measured so the decision to drop it stays",
+            "evidence-led, and so a future multi-specimen pilot is one benchmark run away",
+            "rather than a re-implementation.",
             "",
             "| Recipe | EER | 95% CI | AUC | TAR @ FAR 1% |",
             "|---|---|---|---|---|",
         ]
-        for label, m, is_served in (
-            ("cohort applied" if cohort_on else "no cohort", applied, True),
-            ("no cohort" if cohort_on else "cohort applied", other, False),
+        for label, m in (
+            ("plain similarity *(served)*", applied),
+            ("cohort S-norm", other),
         ):
-            ci = f"{m.eer_ci95[0]:.2%} – {m.eer_ci95[1]:.2%}" if m.eer_ci95 else "—"
-            mark = " *(served)*" if is_served else ""
-            lines += [
-                f"| {label}{mark} | {m.eer:.2%} | {ci} | {m.auc:.4f} | "
+            ci = f"{m.eer_ci95[0]:.2%} - {m.eer_ci95[1]:.2%}" if m.eer_ci95 else "-"
+            lines.append(
+                f"| {label} | {m.eer:.2%} | {ci} | {m.auc:.4f} | "
                 f"{m.tar_at_far.get(0.01, 0):.2%} |"
-            ]
+            )
         lines += [
             "",
-            "If the two intervals overlap heavily the difference is not evidence of",
-            "anything; prefer the simpler recipe. Re-check this on every new corpus —",
-            "cohort normalisation is a net loss on synthetic writers and may not be on",
-            "real ones.",
+            "If the intervals overlap heavily the difference is not evidence of anything;",
+            "prefer the simpler recipe. Re-check on every new corpus — cohort",
+            "normalisation is a net loss on synthetic writers and may not be on real ones.",
             "",
         ]
 
-    if single_ref and "overall" in single_ref and single_ref["overall"].is_evaluable():
-        full = populations["overall"].metrics()
-        one = single_ref["overall"].metrics()
+    if sensitivity:
         lines += [
-            "## Cost of storing only one specimen per customer",
+            "## What more specimens would be worth",
             "",
-            "| References per customer | EER | TAR @ FAR 1% |",
-            "|---|---|---|",
-            f"| All available | {full.eer:.2%} | {full.tar_at_far.get(0.01, 0):.2%} |",
-            f"| Exactly one | {one.eer:.2%} | {one.tar_at_far.get(0.01, 0):.2%} |",
+            "Not deployable today — the customer base is too large for a specimen-collection",
+            "programme — but this is the business case if that ever changes.",
             "",
-            f"Moving from one stored specimen to several changes EER by "
-            f"{(one.eer - full.eer):+.2%}. This is the evidence for or against a "
-            "re-enrolment programme.",
-            "",
+            "| Specimens per customer | EER | 95% CI | TAR @ FAR 1% |",
+            "|---|---|---|---|",
         ]
+        for key, comparisons in sensitivity.items():
+            m = comparisons.metrics()
+            ci = f"{m.eer_ci95[0]:.2%} – {m.eer_ci95[1]:.2%}" if m.eer_ci95 else "—"
+            served = " *(served)*" if key == references_per_customer else ""
+            lines.append(
+                f"| {key}{served} | {m.eer:.2%} | {ci} | {m.tar_at_far.get(0.01, 0):.2%} |"
+            )
+        lines.append("")
 
     lines += [
         "## How to read this",
@@ -482,10 +527,10 @@ def evaluate(args: argparse.Namespace) -> Path:
 
     # --- Cohort from TRAINING signers only --------------------------------
     #
-    # Built and saved regardless, so the artifact exists and the with/without
-    # comparison below can be made. Whether it is *applied* is a separate
-    # decision, taken by SCORING.cohort_normalise and mirrored from the
-    # service, so the headline describes the system that is actually running.
+    # Not on the serving path — it cost 15.7 EER points here, because it answers
+    # the random-impostor question, which is already solved at 0.00%. Built only
+    # so the alternative-recipe table can keep reporting what it would score,
+    # which is what stops that decision being re-taken on intuition.
     cohort = None
     if not args.no_cohort:
         train_embeddings, train_records = embed_records(
@@ -500,60 +545,78 @@ def evaluate(args: argparse.Namespace) -> Path:
         )
         cohort.save(ARTIFACT_ROOT / "cohort.npz", weights_id=model_id)
 
-    # What actually gets applied when scoring.
-    scoring_cohort = cohort if SCORING.cohort_normalise else None
-
-    # --- Calibrator fitted on VALIDATION only -----------------------------
+    # --- Calibrator fitted on VALIDATION, at the SERVED protocol ----------
+    #
+    # `max_references=REFS` is the whole point. Fitting without it built every
+    # shipped curve on six specimens per customer while production ran one, so
+    # every score the system ever showed was a value from one protocol pushed
+    # through a scale built for another.
+    refs = SCORING.calibration_references
     calibrator = None
     if not args.no_calibrate and manifest.by_split("val"):
         val_embeddings, val_records = embed_records(
             model, manifest, "val", device, cache_dir=args.cache_dir
         )
-        val_populations, val_summary = build_comparisons(
-            val_embeddings, val_records, scoring_cohort, seed=args.seed
+        val_populations, _ = build_comparisons(
+            val_embeddings, val_records, None, max_references=refs, seed=args.seed
         )
         val_overall = val_populations["overall"]
         if val_overall.is_evaluable():
+            if val_overall.is_thin() and not args.allow_thin_calibration:
+                raise SystemExit(
+                    f"Validation yields only {len(val_overall.genuine)} genuine / "
+                    f"{len(val_overall.skilled_forgery)} impostor comparisons. A curve fitted "
+                    "on that is coarse enough that the score stops discriminating.\n"
+                    "The fix is more validation *writers* — not more comparisons per writer, "
+                    "and never borrowing from train, whose writers the model memorised.\n"
+                    "Pass --allow-thin-calibration to proceed anyway."
+                )
             calibrator = ScoreCalibrator.fit(
                 val_overall.genuine,
                 val_overall.skilled_forgery,
+                protocol_references=refs,
                 fitted_on="val",
                 weights_id=model_id,
-                # Carried with the curve because it is part of the same scale.
-                population_reference_mean=val_summary["population_reference_mean"],
-                genuine_similarity_floor=val_summary["genuine_similarity_floor"],
             )
+            # Band edges from operating points, on val. Never on test.
+            calibrator.derive_band_edges(val_overall.genuine, val_overall.skilled_forgery)
             calibrator.save(ARTIFACT_ROOT / "calibrator.json")
 
-    # --- Evaluate the requested split -------------------------------------
+    # --- Evaluate the requested split, at the same protocol ---------------
     embeddings, records = embed_records(model, manifest, args.split, device, cache_dir=args.cache_dir)
-    populations, summary = build_comparisons(embeddings, records, scoring_cohort, seed=args.seed)
+    populations, summary = build_comparisons(
+        embeddings, records, None, max_references=refs, seed=args.seed
+    )
     if not args.by_script:
         populations = {"overall": populations["overall"]}
 
-    # The recipe the service does *not* use, measured on the same comparisons.
-    # Cohort normalisation was the default until it was measured and found to
-    # cost 10 EER points here; keeping both numbers in every report is what
-    # stops that decision from being re-taken on intuition.
-    alternate = build_comparisons(
-        embeddings, records, None if scoring_cohort is not None else cohort, seed=args.seed
-    )[0]["overall"]
-
-    single_ref = None
-    if args.single_reference_comparison:
-        # Capping at one specimen makes every writer's own agreement
-        # unmeasurable, so the population median must come from the full run.
-        # Recomputing it here would give 0 and put this whole condition on a
-        # different score scale from the one being compared against — which is
-        # exactly the failure this comparison exists to measure.
-        single_ref, _ = build_comparisons(
-            embeddings,
-            records,
-            scoring_cohort,
-            max_references=1,
-            population_mean=summary["population_reference_mean"],
-            seed=args.seed,
+    # The guard that makes the original bug unrepresentable: the protocol the
+    # curve was fitted for, the protocol the headline measures, and the protocol
+    # the service will run must be the same number.
+    if calibrator is not None and calibrator.protocol_references != summary["max_references"]:
+        raise SystemExit(
+            f"Calibrator fitted for {calibrator.protocol_references} specimen(s) but the "
+            f"headline measures {summary['max_references']}. These must agree or the "
+            "reported accuracy describes a system nobody runs."
         )
+
+    # Recipes the service does *not* use, on the identical comparisons. Kept so
+    # a future multi-specimen pilot is one benchmark run away rather than a
+    # re-implementation, and so the decision to drop them stays evidence-led.
+    alternate = build_comparisons(embeddings, records, cohort, max_references=refs, seed=args.seed)[
+        0
+    ]["overall"]
+
+    # How much a second and third specimen would be worth. Never reaches a
+    # screen; it is the business case for an enrolment programme.
+    sensitivity = {}
+    if args.reference_sensitivity:
+        for n in (1, 2, 3, None):
+            pops, _ = build_comparisons(
+                embeddings, records, None, max_references=n, seed=args.seed
+            )
+            if pops["overall"].is_evaluable():
+                sensitivity[n or "all"] = pops["overall"]
 
     sources = {r.source for r in records}
     synthetic_only = sources == {"synthetic"}
@@ -565,21 +628,24 @@ def evaluate(args: argparse.Namespace) -> Path:
         "split": args.split,
         "sources": ", ".join(sorted(sources)),
         "signers_in_split": len({r.signer_id for r in records}),
-        "cohort": (
-            cohort.describe() if scoring_cohort else "built but not applied"
-        ) if cohort else "disabled",
-        "writer_normalisation": SCORING.writer_normalise,
-        "calibrator": "fitted on val" if calibrator else "not fitted",
+        "calibrator": (
+            f"fitted on val for {calibrator.protocol_references} specimen(s), "
+            f"green from {calibrator.green_min}, red at or below {calibrator.red_max}"
+            if calibrator
+            else "not fitted"
+        ),
         **{k: v for k, v in summary.items() if k != "references_per_writer"},
     }
 
     report = build_report(
         populations,
-        single_ref,
+        sensitivity,
         context,
         synthetic_only=synthetic_only,
         allow_synthetic_headline=args.allow_synthetic_headline,
         alternate=alternate,
+        calibrator=calibrator,
+        references_per_customer=refs,
     )
 
     out_path = Path(args.report)
@@ -601,9 +667,11 @@ def evaluate(args: argparse.Namespace) -> Path:
             {
                 "context": context,
                 "scoring_recipe": {
-                    "writer_normalise": SCORING.writer_normalise,
-                    "cohort_normalise": bool(cohort is not None),
-                    "max_weight_on_nearest_reference": DEFAULT_MAX_WEIGHT,
+                    "score_input": "similarity",
+                    "pooling": SCORING.pooling,
+                    "references_per_customer": refs,
+                    "green_min": calibrator.green_min if calibrator else None,
+                    "red_max": calibrator.red_max if calibrator else None,
                 },
                 "metrics": {
                     name: c.metrics().to_dict()
@@ -615,9 +683,9 @@ def evaluate(args: argparse.Namespace) -> Path:
                     for name, c in populations.items()
                     if len(c.random_forgery) >= 10 and c.genuine
                 },
-                "single_reference_metrics": {
-                    name: c.metrics().to_dict()
-                    for name, c in (single_ref or {}).items()
+                "reference_sensitivity": {
+                    str(key): c.metrics().to_dict()
+                    for key, c in (sensitivity or {}).items()
                     if c.is_evaluable()
                 },
                 "scores": {
@@ -661,12 +729,20 @@ def main() -> None:
     parser.add_argument("--no-cohort", action="store_true")
     parser.add_argument("--no-calibrate", action="store_true")
     parser.add_argument(
-        "--single-reference-comparison",
+        "--reference-sensitivity",
         action=argparse.BooleanOptionalAction,
         default=True,
         help=(
-            "Also measure the one-specimen-per-customer case. Was declared "
-            "store_true with default=True, so it could never be switched off."
+            "Also measure 2 and 3 specimens per customer. Never reaches a screen; "
+            "it is the business case for an enrolment programme."
+        ),
+    )
+    parser.add_argument(
+        "--allow-thin-calibration",
+        action="store_true",
+        help=(
+            "Write a calibrator fitted on fewer than 200 comparisons per class. "
+            "The curve will be coarse enough that the score stops discriminating."
         ),
     )
     parser.add_argument("--cache-dir", type=Path, default=None)

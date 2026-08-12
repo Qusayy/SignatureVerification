@@ -20,8 +20,7 @@ import torch
 
 from ml.embed.provenance import UNKNOWN_WEIGHTS_ID, weights_id
 from ml.scoring.calibrate import ScoreCalibrator
-from ml.scoring.compare import compare_to_references, intra_reference_mean
-from ml.scoring.znorm import CohortNormalizer
+from ml.scoring.calibrate import CalibratorSchemaError
 
 
 # --------------------------------------------------------------------------
@@ -57,54 +56,80 @@ def test_non_tensor_entries_do_not_break_hashing():
 
 
 # --------------------------------------------------------------------------
-# Artifact stamping
+# Artifact stamping and refusal
+#
+# A calibrator is a function of a specific embedding space *and* a specific
+# verification protocol. Paired with other weights, or with a different number
+# of stored specimens, it produces numbers in an entirely normal range that mean
+# nothing. Both have shipped here.
 # --------------------------------------------------------------------------
 
 
-def test_cohort_round_trips_its_weights_stamp(tmp_path):
-    cohort = _cohort(dim=8)
-    cohort.save(tmp_path / "cohort.npz", weights_id="deadbeefdeadbeef")
-    assert CohortNormalizer.load(tmp_path / "cohort.npz").weights_id == "deadbeefdeadbeef"
-
-
-def test_cohort_without_a_stamp_loads_as_unverifiable(tmp_path):
-    """Cohorts written before the stamp existed must not masquerade as matching."""
-    cohort = _cohort(dim=8)
-    np.savez_compressed(
-        tmp_path / "old.npz",
-        embeddings=cohort.embeddings.astype(np.float32),
-        signers=np.array(cohort.signers),
+def _fitted(seed: int = 0, refs: int = 1, weights: str = "") -> ScoreCalibrator:
+    rng = np.random.default_rng(seed)
+    return ScoreCalibrator.fit(
+        rng.normal(0.93, 0.02, 400),
+        rng.normal(0.85, 0.04, 400),
+        protocol_references=refs,
+        weights_id=weights,
+        fitted_on="val",
     )
-    assert CohortNormalizer.load(tmp_path / "old.npz").weights_id == UNKNOWN_WEIGHTS_ID
 
 
-def test_calibrator_round_trips_its_weights_stamp(tmp_path):
-    rng = np.random.default_rng(0)
-    calibrator = ScoreCalibrator.fit(
-        rng.normal(1.0, 0.3, 60), rng.normal(0.0, 0.3, 60), weights_id="abc123"
+def test_calibrator_round_trips(tmp_path):
+    original = _fitted(weights="abc123")
+    original.derive_band_edges(
+        np.random.default_rng(1).normal(0.93, 0.02, 400),
+        np.random.default_rng(2).normal(0.85, 0.04, 400),
     )
-    calibrator.save(tmp_path / "cal.json")
-    assert ScoreCalibrator.load(tmp_path / "cal.json").weights_id == "abc123"
+    original.save(tmp_path / "cal.json")
+    reloaded = ScoreCalibrator.load(tmp_path / "cal.json")
+
+    assert reloaded.weights_id == "abc123"
+    assert reloaded.protocol_references == 1
+    assert reloaded.green_min == original.green_min
+    assert reloaded.red_max == original.red_max
+    for s in (0.80, 0.90, 0.95):
+        assert reloaded.score_0_100(s) == pytest.approx(original.score_0_100(s))
 
 
-def test_calibrator_warns_on_a_thin_fit():
-    """The shipped curve was fitted on 72/96 and saturated at 0.995."""
+def test_a_pre_rework_calibrator_is_refused(tmp_path):
+    """Schema 1 was fitted on writer-normalised margins.
+
+    Applying it to a similarity is not a degraded result, it is a different
+    scale — which is how a 4.7% match came to read 69/100.
+    """
+    import json
+
+    (tmp_path / "old.json").write_text(
+        json.dumps({"x": [-0.7, 0.0, 0.04], "y": [0.005, 0.5, 0.995], "fitted_on": "val"})
+    )
+    with pytest.raises(CalibratorSchemaError, match="schema version 1"):
+        ScoreCalibrator.load(tmp_path / "old.json")
+
+
+def test_thin_fit_is_stamped_and_warned():
     rng = np.random.default_rng(0)
-    with pytest.warns(UserWarning, match="isotonic fit degenerates"):
-        ScoreCalibrator.fit(rng.normal(1.0, 0.3, 40), rng.normal(0.0, 0.3, 40))
+    with pytest.warns(UserWarning, match="below 200"):
+        calibrator = ScoreCalibrator.fit(
+            rng.normal(0.93, 0.02, 80),
+            rng.normal(0.85, 0.04, 80),
+            protocol_references=1,
+        )
+    assert calibrator.thin_fit
+
+
+def test_fit_refuses_a_set_too_small_to_mean_anything():
+    rng = np.random.default_rng(0)
+    with pytest.raises(ValueError, match="Too few scores"):
+        ScoreCalibrator.fit(
+            rng.normal(0.93, 0.02, 20), rng.normal(0.85, 0.04, 20), protocol_references=1
+        )
 
 
 # --------------------------------------------------------------------------
-# Refusal
+# Refusal at load
 # --------------------------------------------------------------------------
-
-
-def _cohort(dim: int = 512, n: int = 120) -> CohortNormalizer:
-    """A cohort large enough to satisfy the impostor-distribution guard."""
-    rng = np.random.default_rng(5)
-    vectors = rng.normal(size=(n, dim))
-    vectors /= np.linalg.norm(vectors, axis=1, keepdims=True)
-    return CohortNormalizer(vectors, [f"s{i:04d}" for i in range(n)])
 
 
 def _write_checkpoint(path, state):
@@ -121,45 +146,57 @@ def _write_checkpoint(path, state):
     )
 
 
-def test_verifier_refuses_a_cohort_from_other_weights(tmp_path):
+def test_verifier_refuses_a_calibrator_from_other_weights(tmp_path):
     from ml.embed.models import build_model
     from ml.scoring.verifier import ArtifactMismatch, Verifier
 
     checkpoint = tmp_path / "model.pt"
     _write_checkpoint(checkpoint, build_model("signet").state_dict())
+    _fitted(weights="0000000000000000").save(tmp_path / "cal.json")
 
-    _cohort().save(tmp_path / "cohort.npz", weights_id="0000000000000000")
-
-    with pytest.raises(ArtifactMismatch, match="cohort.npz"):
+    with pytest.raises(ArtifactMismatch, match="cal.json"):
         Verifier.from_artifacts(
-            checkpoint,
-            cohort_path=tmp_path / "cohort.npz",
-            calibrator_path=tmp_path / "absent.json",
-            device="cpu",
+            checkpoint, calibrator_path=tmp_path / "cal.json", device="cpu"
         )
 
 
-def test_verifier_refuses_an_unstamped_cohort(tmp_path):
-    """The exact state the shipped artifacts were in."""
+def test_verifier_refuses_a_calibrator_fitted_for_another_protocol(tmp_path):
+    """The bug that made every score meaningless, made unrepresentable.
+
+    Every shipped curve was fitted on six specimens per customer while
+    production ran one.
+    """
+    from dataclasses import replace
+
+    from ml.config import SCORING
     from ml.embed.models import build_model
-    from ml.scoring.verifier import ArtifactMismatch, Verifier
+    from ml.scoring.verifier import CalibratorUnavailable, Verifier
+
+    model = build_model("signet")
+    checkpoint = tmp_path / "model.pt"
+    _write_checkpoint(checkpoint, model.state_dict())
+    _fitted(refs=6, weights=weights_id(model.state_dict())).save(tmp_path / "cal.json")
+
+    with pytest.raises(CalibratorUnavailable, match="fitted for 6 specimen"):
+        Verifier.from_artifacts(
+            checkpoint,
+            calibrator_path=tmp_path / "cal.json",
+            device="cpu",
+            cfg=replace(SCORING, calibration_references=1),
+        )
+
+
+def test_verifier_refuses_to_load_without_a_calibrator(tmp_path):
+    """No dash at the counter. The refusal belongs where an engineer sees it."""
+    from ml.embed.models import build_model
+    from ml.scoring.verifier import CalibratorUnavailable, Verifier
 
     checkpoint = tmp_path / "model.pt"
     _write_checkpoint(checkpoint, build_model("signet").state_dict())
 
-    unstamped = _cohort()
-    np.savez_compressed(
-        tmp_path / "cohort.npz",
-        embeddings=unstamped.embeddings.astype(np.float32),
-        signers=np.array(unstamped.signers),
-    )
-
-    with pytest.raises(ArtifactMismatch, match="predates this check"):
+    with pytest.raises(CalibratorUnavailable, match="benchmark"):
         Verifier.from_artifacts(
-            checkpoint,
-            cohort_path=tmp_path / "cohort.npz",
-            calibrator_path=tmp_path / "absent.json",
-            device="cpu",
+            checkpoint, calibrator_path=tmp_path / "absent.json", device="cpu"
         )
 
 
@@ -171,313 +208,10 @@ def test_verifier_accepts_matching_artifacts(tmp_path):
     checkpoint = tmp_path / "model.pt"
     _write_checkpoint(checkpoint, model.state_dict())
     identity = weights_id(model.state_dict())
-
-    _cohort().save(tmp_path / "cohort.npz", weights_id=identity)
+    _fitted(weights=identity).save(tmp_path / "cal.json")
 
     verifier = Verifier.from_artifacts(
-        checkpoint,
-        cohort_path=tmp_path / "cohort.npz",
-        calibrator_path=tmp_path / "absent.json",
-        device="cpu",
+        checkpoint, calibrator_path=tmp_path / "cal.json", device="cpu"
     )
-    # The version string identifies the weights, not the commit that built them.
     assert verifier.model_version == f"signet@{identity}"
     assert "unknown" not in verifier.model_version
-
-
-def test_missing_artifacts_are_still_tolerated(tmp_path):
-    """The stack must start before a benchmark has ever been run."""
-    from ml.embed.models import build_model
-    from ml.scoring.verifier import Verifier
-
-    checkpoint = tmp_path / "model.pt"
-    _write_checkpoint(checkpoint, build_model("signet").state_dict())
-
-    verifier = Verifier.from_artifacts(
-        checkpoint,
-        cohort_path=tmp_path / "absent.npz",
-        calibrator_path=tmp_path / "absent.json",
-        device="cpu",
-    )
-    assert verifier.cohort is None
-    assert verifier.calibrator.is_placeholder
-
-
-# --------------------------------------------------------------------------
-# Writer-internal normalisation
-# --------------------------------------------------------------------------
-
-
-def test_intra_reference_mean_is_the_off_diagonal_mean():
-    refs = np.array([[1.0, 0.0], [0.0, 1.0]])
-    # Two orthogonal specimens: every cross-pair similarity is 0.
-    assert intra_reference_mean(refs) == pytest.approx(0.0, abs=1e-9)
-
-    identical = np.array([[1.0, 0.0], [1.0, 0.0]])
-    assert intra_reference_mean(identical) == pytest.approx(1.0, abs=1e-9)
-
-
-def test_intra_reference_mean_needs_two_specimens():
-    assert intra_reference_mean(np.array([[1.0, 0.0]])) == 0.0
-
-
-def _consistent_refs(n: int = 4, dim: int = 32, spread: float = 0.05) -> np.ndarray:
-    """Specimens that resemble each other, as a real customer's do.
-
-    Random Gaussian vectors have near-zero mutual agreement, which now
-    correctly reads as a broken enrolment rather than a normal customer.
-    """
-    rng = np.random.default_rng(21)
-    base = rng.normal(size=dim)
-    base /= np.linalg.norm(base)
-    return np.vstack([base + spread * rng.normal(size=dim) for _ in range(n)])
-
-
-def test_writer_normalisation_subtracts_specimen_agreement():
-    rng = np.random.default_rng(3)
-    refs = _consistent_refs()
-    query = rng.normal(size=32)
-
-    plain = compare_to_references(query, refs, writer_normalise=False)
-    normalised = compare_to_references(query, refs, writer_normalise=True)
-
-    assert normalised.raw == pytest.approx(plain.raw - intra_reference_mean(refs))
-    assert normalised.is_writer_normalised
-    assert not plain.is_writer_normalised
-
-
-def test_a_consistent_writer_is_held_to_a_stricter_standard():
-    """The whole point: the same similarity means different things per customer.
-
-    Two customers, both scoring 0.90 against their specimens. One signs almost
-    identically every time; the other varies. The consistent one has produced
-    something unusual for them, and the score has to say so.
-    """
-    dim = 64
-    base = np.zeros(dim)
-    base[0] = 1.0
-
-    def rotated(angle: float) -> np.ndarray:
-        vector = np.zeros(dim)
-        vector[0] = np.cos(angle)
-        vector[1] = np.sin(angle)
-        return vector
-
-    consistent = np.vstack([rotated(0.0), rotated(0.02), rotated(-0.02)])
-    variable = np.vstack([rotated(0.0), rotated(0.6), rotated(-0.6)])
-
-    query = rotated(0.30)
-    strict = compare_to_references(query, consistent)
-    lenient = compare_to_references(query, variable)
-
-    assert strict.raw < lenient.raw
-
-
-def test_single_specimen_falls_back_rather_than_subtracting_zero():
-    refs = np.array([[1.0, 0.0, 0.0]])
-    score = compare_to_references(np.array([1.0, 0.0, 0.0]), refs, writer_normalise=True)
-    # No per-customer baseline, so the floor is what remains.
-    assert not score.is_writer_normalised
-    assert score.floor_applied
-
-
-def test_precomputed_reference_mean_matches_recomputation():
-    rng = np.random.default_rng(11)
-    refs = _consistent_refs(n=5, dim=16)
-    query = rng.normal(size=16)
-
-    cached = compare_to_references(query, refs, reference_mean=intra_reference_mean(refs))
-    fresh = compare_to_references(query, refs)
-    assert cached.raw == pytest.approx(fresh.raw)
-
-
-# --------------------------------------------------------------------------
-# The single-specimen ceiling
-#
-# With one specimen a customer's own consistency cannot be measured, so the
-# baseline was 0 and `raw` came through as a bare similarity of ~0.8-1.0. The
-# calibrator is fitted on margins whose domain ends near +0.04, so every one of
-# those clipped to the top of the curve: every single-specimen verification
-# returned ~100, forgeries included. That is the configuration a bank holding
-# one signature per customer is actually in.
-# --------------------------------------------------------------------------
-
-
-def test_single_specimen_uses_the_population_baseline():
-    refs = np.array([[1.0, 0.0, 0.0]])
-    query = np.array([0.9, 0.436, 0.0])
-
-    score = compare_to_references(query, refs, population_reference_mean=0.95)
-
-    assert score.baseline_source == "population"
-    assert score.intra_reference_mean == pytest.approx(0.95)
-    # The margin, not the similarity: comfortably inside the calibrator domain.
-    assert score.raw == pytest.approx(0.9 - 0.95, abs=1e-3)
-
-
-def test_no_baseline_still_gets_the_absolute_floor():
-    """The reported failure, and the reason the escape hatch was wrong.
-
-    One specimen plus a calibrator carrying no population baseline used to mean
-    no baseline *and* no floor, so `raw` came through as a bare similarity: a
-    4.7% match scored 69/100. The case with the least information is the case
-    that most needs the backstop.
-    """
-    refs = np.array([[1.0, 0.0, 0.0]])
-    score = compare_to_references(np.array([1.0, 0.0, 0.0]), refs)
-
-    assert score.baseline_source == "none"
-    assert score.floor_applied
-    # Not the bare similarity: the floor decided it.
-    assert score.raw < 1.0
-
-
-def test_a_nonsense_match_with_no_baseline_is_still_rejected():
-    refs = np.array([[1.0, 0.0, 0.0]])
-    nearly_orthogonal = np.array([0.047, 0.999, 0.0])
-
-    score = compare_to_references(nearly_orthogonal, refs)
-
-    assert score.floor_applied
-    assert score.raw < 0, "a 4.7% match produced a non-negative margin"
-
-
-def test_several_specimens_prefer_their_own_baseline():
-    rng = np.random.default_rng(4)
-    refs = _consistent_refs(n=3, dim=16)
-    query = rng.normal(size=16)
-
-    score = compare_to_references(query, refs, population_reference_mean=0.95)
-
-    assert score.baseline_source == "own"
-    assert score.intra_reference_mean == pytest.approx(intra_reference_mean(refs))
-
-
-def test_single_specimen_scores_do_not_all_clip_to_the_ceiling():
-    """The regression itself, end to end through the calibrator.
-
-    A good and a bad single-specimen query must not both return the same
-    saturated score.
-    """
-    rng = np.random.default_rng(7)
-    # A calibrator fitted on margins, as the real one is.
-    genuine = rng.normal(0.01, 0.02, 300)
-    impostor = rng.normal(-0.12, 0.05, 300)
-    calibrator = ScoreCalibrator.fit(
-        genuine, impostor, population_reference_mean=0.95
-    )
-
-    reference = np.zeros(8)
-    reference[0] = 1.0
-    refs = reference.reshape(1, -1)
-
-    def score(cosine: float) -> float:
-        query = np.zeros(8)
-        query[0], query[1] = cosine, np.sqrt(max(0.0, 1 - cosine**2))
-        raw = compare_to_references(
-            query, refs, population_reference_mean=calibrator.population_reference_mean
-        ).raw
-        return calibrator.score_0_100(raw)
-
-    close, distant = score(0.97), score(0.80)
-    assert close > distant, "single-specimen scores are not discriminating"
-    assert distant < 50, f"a poor single-specimen match still scored {distant}"
-
-
-def test_population_baseline_survives_a_round_trip(tmp_path):
-    rng = np.random.default_rng(0)
-    calibrator = ScoreCalibrator.fit(
-        rng.normal(0.01, 0.02, 300),
-        rng.normal(-0.12, 0.05, 300),
-        population_reference_mean=0.9575,
-    )
-    calibrator.save(tmp_path / "cal.json")
-    assert ScoreCalibrator.load(tmp_path / "cal.json").population_reference_mean == pytest.approx(
-        0.9575
-    )
-
-
-# --------------------------------------------------------------------------
-# Guards on the relative score
-#
-# A signature matching the stored specimen 6.8% scored 88/100. The customer's
-# two specimens did not resemble each other, so their agreement was near zero,
-# so the bar the query had to clear was near zero too. Writer normalisation is
-# a relative judgement and on its own has no floor.
-# --------------------------------------------------------------------------
-
-
-def _orthogonal_refs(dim: int = 64) -> np.ndarray:
-    """Two specimens that look nothing like each other. A broken enrolment."""
-    a, b = np.zeros(dim), np.zeros(dim)
-    a[0], b[1] = 1.0, 1.0
-    return np.vstack([a, b])
-
-
-def _query(dim: int = 64, index: int = 7) -> np.ndarray:
-    v = np.zeros(dim)
-    v[index] = 1.0
-    return v
-
-
-def test_disagreeing_specimens_do_not_lower_the_bar():
-    """The reported failure, reduced to its mechanism."""
-    score = compare_to_references(
-        _query(), _orthogonal_refs(), population_reference_mean=0.95
-    )
-
-    assert score.specimens_disagree
-    assert score.baseline_source == "population", "a broken enrolment must not set the bar"
-    # A query matching nothing must be far below the baseline, not level with it.
-    assert score.raw < -0.5
-
-
-def test_disagreeing_specimens_are_reported_not_silently_corrected():
-    """An operator can fix a bad enrolment, but only if told about it."""
-    score = compare_to_references(
-        _query(), _orthogonal_refs(), population_reference_mean=0.95
-    )
-    assert score.to_dict()["specimens_disagree"] is True
-
-
-def test_absolute_floor_catches_a_nonsense_match():
-    """Even with a plausible baseline, 7% similarity is not a match."""
-    refs = np.vstack([_query(index=0), _query(index=0)])  # perfectly consistent
-    # A baseline low enough that the relative margin alone would look fine.
-    score = compare_to_references(_query(index=3), refs, reference_mean=0.05)
-    assert score.raw < 0, "an orthogonal query cleared the bar"
-
-
-def test_guards_only_ever_lower_a_score():
-    """The safety property that makes them safe to add.
-
-    Neither guard may raise a score, so neither can create a false accept.
-    """
-    rng = np.random.default_rng(19)
-    dim = 48
-    base = rng.normal(size=dim)
-    base /= np.linalg.norm(base)
-
-    for spread in (0.02, 0.2, 0.8):
-        refs = np.vstack([base + spread * rng.normal(size=dim) for _ in range(3)])
-        for _ in range(20):
-            query = base + rng.normal(size=dim) * rng.uniform(0.01, 1.5)
-            guarded = compare_to_references(query, refs, population_reference_mean=0.95)
-            plain = compare_to_references(query, refs, writer_normalise=False)
-            own = intra_reference_mean(refs)
-            unguarded_margin = plain.raw - own
-            assert guarded.raw <= max(unguarded_margin, plain.raw) + 1e-9
-
-
-def test_a_consistent_customer_is_unaffected_by_the_guards():
-    """Real specimen sets sit far above both floors, so nothing changes."""
-    refs = _consistent_refs(n=3, dim=32, spread=0.02)
-    query = refs[0].copy()
-
-    score = compare_to_references(query, refs, population_reference_mean=0.95)
-
-    assert score.baseline_source == "own"
-    assert not score.specimens_disagree
-    assert score.raw == pytest.approx(
-        0.5 * score.max_similarity + 0.5 * score.mean_similarity - score.intra_reference_mean
-    )

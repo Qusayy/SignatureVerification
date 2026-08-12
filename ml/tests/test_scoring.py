@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from ml.config import SCORING
-from ml.scoring.calibrate import Band, ScoreCalibrator, band_for
+from ml.scoring.calibrate import Band, ScoreCalibrator
 from ml.scoring.compare import compare_to_references, l2_normalize
 from ml.scoring.explain import difference_overlay, reason_text, side_by_side
 from ml.scoring.verifier import VerificationResult, Verifier, _canvas_iou
@@ -31,34 +31,34 @@ def _cohort(n: int = 120, seed: int = 0) -> CohortNormalizer:
 
 def test_identical_signature_scores_one():
     query = _unit(np.arange(DIM))
-    score = compare_to_references(query, query.reshape(1, -1), writer_normalise=False)
-    assert score.raw == pytest.approx(1.0)
+    score = compare_to_references(query, query.reshape(1, -1))
+    assert score.similarity == pytest.approx(1.0)
     assert score.is_single_reference
 
 
 def test_single_reference_collapses_max_and_mean():
     rng = np.random.default_rng(1)
-    # writer_normalise=False: this asserts that one reference collapses max and
-    # mean, not how the result is expressed relative to a baseline or floor.
-    score = compare_to_references(
-        rng.normal(size=DIM), rng.normal(size=(1, DIM)), writer_normalise=False
-    )
+    score = compare_to_references(rng.normal(size=DIM), rng.normal(size=(1, DIM)))
     assert score.max_similarity == pytest.approx(score.mean_similarity)
-    assert score.raw == pytest.approx(score.max_similarity)
+    assert score.similarity == pytest.approx(score.max_similarity)
 
 
-def test_multi_reference_uses_both_nearest_and_mean():
-    """One close specimen must lift the score, but not all the way to its own."""
+def test_the_score_is_the_nearest_specimen():
+    """`max` pooling, so an extra specimen can only ever help.
+
+    A blended max/mean statistic changes distribution with the specimen count,
+    so the same signature would score differently for reasons that have nothing
+    to do with the signature. With one specimen per customer as the norm and
+    two as an occasional exception, invariance to the count matters more than
+    the small accuracy the blend bought.
+    """
     query = _unit([1.0] + [0.0] * (DIM - 1))
-    close = query
     far = _unit([0.0, 1.0] + [0.0] * (DIM - 2))
-    # writer_normalise=False: this asserts how the references are pooled,
-    # not how the result is expressed relative to a baseline.
-    score = compare_to_references(query, np.vstack([close, far]), writer_normalise=False)
+    score = compare_to_references(query, np.vstack([query, far]))
 
     assert score.max_similarity == pytest.approx(1.0)
     assert score.mean_similarity == pytest.approx(0.5, abs=1e-6)
-    assert score.mean_similarity < score.raw < score.max_similarity
+    assert score.similarity == pytest.approx(score.max_similarity)
 
 
 def test_comparison_rejects_an_empty_reference_set():
@@ -142,58 +142,70 @@ def test_cohort_from_signers_takes_one_vector_per_writer():
 
 def _fitted_calibrator(seed: int = 6) -> ScoreCalibrator:
     rng = np.random.default_rng(seed)
-    return ScoreCalibrator.fit(
-        rng.normal(2.5, 0.8, 500), rng.normal(-0.5, 0.8, 500), fitted_on="val"
-    )
+    genuine, impostor = rng.normal(0.93, 0.025, 500), rng.normal(0.85, 0.045, 500)
+    calibrator = ScoreCalibrator.fit(genuine, impostor, protocol_references=1)
+    calibrator.derive_band_edges(genuine, impostor)
+    return calibrator
 
 
 def test_calibrator_is_monotonic():
     calibrator = _fitted_calibrator()
-    probabilities = [calibrator.probability(s) for s in np.linspace(-4, 6, 60)]
-    # Deliberately offset lists, so the length mismatch is the point.
+    probabilities = [calibrator.probability(s) for s in np.linspace(0.4, 1.0, 60)]
     assert all(b >= a - 1e-9 for a, b in zip(probabilities, probabilities[1:], strict=False))
 
 
 def test_calibrator_separates_the_two_populations():
     calibrator = _fitted_calibrator()
-    assert calibrator.score_0_100(3.5) > 75
-    assert calibrator.score_0_100(-1.5) < 25
+    assert calibrator.score_0_100(0.98) > 70
+    assert calibrator.score_0_100(0.75) < 25
 
 
 def test_calibrator_never_reports_absolute_certainty():
     """A verification system claiming 100% confidence is lying."""
     calibrator = _fitted_calibrator()
-    assert 0.0 < calibrator.probability(-99.0)
-    assert calibrator.probability(99.0) < 1.0
+    assert 0.0 < calibrator.probability(-1.0)
+    assert calibrator.probability(1.0) < 1.0
 
 
 def test_calibrator_refuses_to_fit_on_too_little_data():
     with pytest.raises(ValueError, match="Too few scores"):
-        ScoreCalibrator.fit([1.0, 2.0], [0.0, 0.5])
+        ScoreCalibrator.fit([0.9] * 5, [0.8] * 5, protocol_references=1)
 
 
 def test_calibrator_round_trips_without_sklearn(tmp_path):
     calibrator = _fitted_calibrator()
     reloaded = ScoreCalibrator.load(calibrator.save(tmp_path / "cal.json"))
-    for s in (-2.0, 0.0, 1.5, 3.0):
-        assert reloaded.probability(s) == pytest.approx(calibrator.probability(s))
+    for s in (0.70, 0.85, 0.93, 0.99):
+        # Breakpoints are rounded to 6 dp on save, which is far finer than the
+        # 1-dp score anyone sees.
+        assert reloaded.probability(s) == pytest.approx(calibrator.probability(s), abs=1e-5)
 
 
-def test_placeholder_calibrator_is_flagged():
-    assert ScoreCalibrator.identity().is_placeholder
-    assert not _fitted_calibrator().is_placeholder
-
-
-def test_bands_follow_the_configured_edges():
-    assert band_for(SCORING.green_min + 1) is Band.GREEN
-    assert band_for(SCORING.red_max - 1) is Band.RED
-    assert band_for((SCORING.green_min + SCORING.red_max) / 2) is Band.AMBER
-
-
-def test_threshold_inversion_matches_the_forward_map():
+def test_bands_follow_the_calibrators_own_edges():
+    """Not the config. A fixed edge on a probability has no operational meaning
+    — the probability is conditioned on the benchmark's genuine/impostor mix,
+    not on the base rate at a counter."""
     calibrator = _fitted_calibrator()
-    threshold = calibrator.threshold_for_probability(0.5)
-    assert calibrator.probability(threshold) == pytest.approx(0.5, abs=0.05)
+
+    green_min, red_max = calibrator.effective_edges()
+    assert (green_min, red_max) == (calibrator.green_min, calibrator.red_max)
+    assert calibrator.band(calibrator.similarity_for_score(green_min + 5)) is Band.GREEN
+    assert calibrator.band(calibrator.similarity_for_score(max(red_max - 5, 0.1))) is Band.RED
+
+
+def test_band_edges_fall_back_when_none_were_derived():
+    rng = np.random.default_rng(0)
+    calibrator = ScoreCalibrator.fit(
+        rng.normal(0.93, 0.025, 300), rng.normal(0.85, 0.045, 300), protocol_references=1
+    )
+    assert calibrator.green_min == 0.0
+    assert calibrator.effective_edges() == (SCORING.green_min_fallback, SCORING.red_max_fallback)
+
+
+def test_score_inversion_matches_the_forward_map():
+    calibrator = _fitted_calibrator()
+    similarity = calibrator.similarity_for_score(50.0)
+    assert calibrator.score_0_100(similarity) == pytest.approx(50.0, abs=5.0)
 
 
 # --------------------------------------------------------------------------
@@ -312,51 +324,55 @@ class _StubModel:
         return torch.from_numpy(np.tile(vector, (tensor.shape[0], 1)).astype(np.float32))
 
 
-def test_verifier_flags_an_unnormalisable_single_specimen():
-    """One specimen on file leaves the score without a per-customer baseline.
+def _stub_verifier(model) -> Verifier:
+    """A verifier over a stub model, with a curve fitted on plausible scores."""
+    rng = np.random.default_rng(11)
+    genuine, impostor = rng.normal(0.93, 0.025, 400), rng.normal(0.85, 0.045, 400)
+    calibrator = ScoreCalibrator.fit(genuine, impostor, protocol_references=1)
+    calibrator.derive_band_edges(genuine, impostor)
+    return Verifier(model, calibrator=calibrator, device="cpu")
 
-    Specimen agreement is the mean similarity *between* a customer's specimens,
-    so a customer with one has none, and their score is not comparable with
-    anyone else's. That has to be visible rather than implied.
+
+def test_a_single_specimen_still_produces_a_score():
+    """One specimen is the deployed protocol, not a degraded case.
+
+    It used to withhold the number and attach three warnings explaining why the
+    score was worth less than usual — on every verification, since every
+    customer has one specimen.
     """
     from ml.data.synth import make_signer, render_signature
 
     rng = np.random.default_rng(9)
-    model = _StubModel({0: rng.normal(size=DIM)})
-    verifier = Verifier(model, cohort=None, calibrator=None, device="cpu")  # type: ignore[arg-type]
+    verifier = _stub_verifier(_StubModel({0: rng.normal(size=DIM)}))  # type: ignore[arg-type]
+    style = make_signer("C1", "latin", rng)
+    # A different signing, not the enrolled image itself — re-presenting the
+    # stored specimen is a photocopy, and the copy check correctly says so.
+    specimen = render_signature(style, rng, kind="genuine")
+    query = render_signature(style, rng, kind="genuine")
 
-    image = render_signature(make_signer("C1", "latin", rng), rng, kind="genuine")
+    result = verifier.verify(query, verifier.enrol("C1", [specimen]))
 
-    enrolment = verifier.enrol("C1", [image])
-    result = verifier.verify(image, enrolment)
-
-    assert "score_not_writer_normalised" in result.warnings
-    assert "uncalibrated_score_placeholder" in result.warnings
-    assert "single_reference_lower_confidence" in result.warnings
-    assert result.comparison.is_writer_normalised is False
-    assert result.calibrated is False
-    assert result.to_dict()["advisory_only"] is True
+    assert 0.0 <= result.score <= 100.0
+    assert result.calibrated
+    assert result.comparison.is_single_reference
+    # Nothing in the response suggests the number was compromised by the count.
+    assert not [w for w in result.warnings if "specimen" in w or "scale" in w]
 
 
-def test_several_specimens_are_writer_normalised():
+def test_the_result_carries_the_similarity_the_score_came_from():
     from ml.data.synth import make_signer, render_signature
 
     rng = np.random.default_rng(9)
-    model = _StubModel({0: rng.normal(size=DIM)})
-    verifier = Verifier(model, cohort=None, calibrator=None, device="cpu")  # type: ignore[arg-type]
+    verifier = _stub_verifier(_StubModel({0: rng.normal(size=DIM)}))  # type: ignore[arg-type]
+    image = render_signature(make_signer("C1", "latin", rng), rng, kind="genuine")
 
-    style = make_signer("C1", "latin", rng)
-    references = [render_signature(style, rng, kind="genuine") for _ in range(3)]
+    result = verifier.verify(image, verifier.enrol("C1", [image]))
 
-    enrolment = verifier.enrol("C1", references)
-    result = verifier.verify(references[0], enrolment)
-
-    assert result.comparison.is_writer_normalised
-    assert "score_not_writer_normalised" not in result.warnings
-    assert enrolment.reference_mean is not None
+    assert result.score == verifier.calibrator.score_0_100(result.comparison.similarity)
+    assert result.normalized_score == pytest.approx(result.comparison.similarity)
 
 
 def test_verifier_rejects_enrolment_with_no_references():
-    verifier = Verifier(_StubModel({0: np.ones(DIM)}), device="cpu")  # type: ignore[arg-type]
+    verifier = _stub_verifier(_StubModel({0: np.ones(DIM)}))  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="no reference signatures"):
         verifier.enrol("C1", [])

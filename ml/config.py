@@ -129,91 +129,84 @@ class ScoringConfig:
     """Scoring behaviour.
 
     Bands are ADVISORY. The system never accepts or rejects on its own; the
-    employee always decides. Thresholds are placeholders until calibrated on
-    the organisation's sealed test set by ml/eval/benchmark.py.
+    employee always decides.
+
+    **The deployment protocol is one stored specimen per customer.** That is not
+    a degraded case to be worked around — it is the design point, because the
+    customer base is too large for a specimen-collection programme. Everything
+    here follows from it.
+
+    An earlier design expressed each score relative to the agreement among a
+    customer's *own* specimens, which was worth 15.7 EER points at two or more
+    specimens and exactly nothing at one, where the "baseline" degenerates to a
+    corpus constant. It has been removed from the serving path.
+    `ml.eval.benchmark` still reports it as an alternative recipe, so a future
+    multi-specimen pilot needs one benchmark run rather than a
+    re-implementation.
     """
 
-    # How a similarity becomes a score. Measured on the sealed 200-signer test
-    # split of manifest_large with signet_v3_geom.pt — one checkpoint, one set
-    # of comparisons, only the recipe varying:
+    # Specimens per customer, in both the calibration protocol and production.
+    # The calibrator records the protocol it was fitted for and the service
+    # refuses a mismatch — a curve fitted on six specimens and applied to one is
+    # a value from one measurement pushed through a scale built for another,
+    # which is what every score before this rework was.
+    calibration_references: int = 1
+
+    # How several specimens are pooled, on the rare occasion there are several.
+    # `max` keeps the score's meaning invariant to specimen count: at one
+    # specimen it is exactly the calibrated condition, and an extra specimen can
+    # only raise a genuine customer's score. A blended max/mean statistic
+    # changes shape with the count in a way that is neither bounded nor
+    # reportable.
+    pooling: str = "max"
+
+    # --- Band edges ------------------------------------------------------
     #
-    #   recipe                            EER     95% CI       AUC     TAR@FAR1%
-    #   cohort S-norm  (previous default) 35.80%  34.0-37.8    0.703   4.10%
-    #   raw similarity                    23.90%  21.9-25.6    0.849   9.50%
-    #   writer-internal  (current)        20.10%  18.4-21.4    0.878   4.90%
-    #   writer-internal + cohort          30.40%  28.6-32.3    0.769   6.30%
+    # Derived from operating points on validation and stored in the calibrator,
+    # not fixed here. The 0-100 score is P(genuine) under the prior the
+    # benchmark constructs (~45% genuine); at a counter the forgery base rate is
+    # nearer 0.1%. So the number is a monotone rank statistic wearing a
+    # probability's clothes, and a fixed edge at 75 has no operational meaning —
+    # change the forgeries-per-writer in the validation split and the same
+    # signature lands in a different band.
     #
-    # Reproduce with `python -m ml.eval.benchmark`, which prints the served
-    # recipe against its alternative on every run.
-
-    # Express each score relative to how consistently the customer signs, by
-    # subtracting the mean pairwise similarity among their own specimens.
-    # Worth 15.7 EER points over the previous default, with non-overlapping
-    # intervals.
+    # FAR and FRR are conditional on class and therefore invariant to that mix.
+    # Green admits at most `green_max_far` of forgeries; red rejects at most
+    # `red_max_frr` of genuine signatures.
     #
-    # The caveat, which the EER hides: at FAR = 1% the plain raw similarity is
-    # better (9.50% TAR vs 4.90%). Writer normalisation improves the middle of
-    # the curve more than the strict tail. EER and AUC are the right target
-    # *for this system* because it is advisory and bands uncertain cases amber
-    # rather than auto-accepting — but a deployment that wanted a
-    # high-precision auto-accept threshold should re-take this decision, and
-    # neither recipe supports one today.
-    writer_normalise: bool = True
+    # At one specimen on the sealed test set, green at FAR 5% admits roughly 39%
+    # of genuine traffic: about 40% green, 55% amber, 5% red. Amber means the
+    # teller compares manually, which is what they do for everything today.
+    green_max_far: float = 0.05
+    red_max_frr: float = 0.05
 
-    # --- Guards on the relative score -----------------------------------
+    # Used only when a calibrator carries no derived edges. Under the refusal
+    # policy in ml/scoring/verifier.py such a calibrator cannot reach
+    # production, so these serve tests and the pre-benchmark state.
+    green_min_fallback: float = 75.0
+    red_max_fallback: float = 40.0
+
+    # --- Photocopy detection ---------------------------------------------
     #
-    # Writer normalisation is a *relative* judgement, and on its own it has no
-    # floor: a customer whose stored specimens do not resemble each other has a
-    # baseline near zero, so any query at all clears it. A signature matching
-    # the specimen 6.8% scored 88/100 that way. Both guards below can only ever
-    # lower a score, never raise one, so neither can introduce a false accept.
-
-    # No relative margin rescues an absolute similarity this low. A genuine
-    # signature sits at 0.90-0.99 and even a good forgery at 0.79-0.95, so this
-    # never binds on real comparisons — it exists to stop nonsense, not to
-    # tune the operating point.
-    absolute_similarity_floor: float = 0.60
-
-    # Specimen agreement below this means the stored specimens do not look like
-    # each other. That is a broken enrolment — wrong customer, mis-cropped
-    # scan, two different people — and it must not be read as "this customer is
-    # easy to match". The population baseline is used instead, and the response
-    # says so.
-    min_specimen_agreement: float = 0.50
-
-    # Cohort z/t/s-normalisation against a background population.
+    # A genuine signature is never reproduced exactly. Near-pixel-identical
+    # geometry indicates a copy of the stored specimen pasted onto the form,
+    # which is a fraud signal rather than the strongest possible match.
     #
-    # OFF by default, which reverses the original design. It was adopted for
-    # the standard speaker-verification reason and measured afterwards: it
-    # costs 15.7 EER points on its own, and 10.3 even on top of writer
-    # normalisation.
-    #
-    # The reason it hurts here is that it answers "does this signature look
-    # more like this customer than like the population?", which is the
-    # *random-impostor* question. That one is already solved — random-impostor
-    # EER is 0.00% on this corpus. The question that matters is whether a
-    # deliberate imitation of this customer is genuine, and against that a
-    # background population is noise.
-    #
-    # Left switchable rather than deleted: it may earn its place on a real
-    # corpus with genuinely diverse writers. `ml.eval.benchmark` reports both.
-    cohort_normalise: bool = False
-
-    # Size of the impostor cohort used for z-normalisation.
-    cohort_size: int = 200
-
-    # Advisory band edges on the calibrated 0-100 score.
-    green_min: float = 75.0
-    red_max: float = 40.0
-
-    # A calibrated score at or above this, combined with near-pixel-identical
-    # geometry, indicates a photocopy of the stored reference rather than a
-    # fresh signature. Flagged as suspected fraud, not as a strong match.
-    duplicate_score_min: float = 99.0
+    # The similarity half of the test lives in the calibrator
+    # (`duplicate_similarity_min`, the 99.9th percentile of genuine) rather than
+    # here. It used to be a threshold on the calibrated *score* (99.0), which
+    # stopped firing the moment honest calibration lowered the ceiling below it
+    # — a fraud control disabled by an unrelated improvement.
     duplicate_iou_min: float = 0.985
 
     # FAR operating points reported by the evaluation harness.
     far_targets: tuple[float, ...] = (0.10, 0.05, 0.01, 0.001)
+
+    # Size of the impostor cohort, for the benchmark's alternative-recipe
+    # comparison only. Cohort normalisation is not on the serving path: it cost
+    # 15.7 EER points here, because it answers the random-impostor question,
+    # which is already solved at 0.00% EER.
+    cohort_size: int = 200
 
 
 SCORING = ScoringConfig()
