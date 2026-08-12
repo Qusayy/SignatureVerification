@@ -82,6 +82,12 @@ class ScoreCalibrator:
     # domain ends near 0.04 — so it clips to the ceiling and every single
     # specimen customer scores ~100, forgeries included.
     population_reference_mean: float = 0.0
+    # A similarity below which no genuine comparison was ever observed on the
+    # validation split. Derived from the corpus rather than fixed, because the
+    # absolute cosine scale is a property of the trained model: a constant
+    # tuned on one corpus is meaningless on another and fails silently. 0.0
+    # means "not measured", and the configured default is used instead.
+    genuine_similarity_floor: float = 0.0
 
     # -- fitting ----------------------------------------------------------
 
@@ -94,6 +100,7 @@ class ScoreCalibrator:
         fitted_on: str = "",
         weights_id: str = "",
         population_reference_mean: float = 0.0,
+        genuine_similarity_floor: float = 0.0,
         clip: tuple[float, float] = (0.005, 0.995),
         min_samples: int = 10,
     ) -> ScoreCalibrator:
@@ -156,6 +163,7 @@ class ScoreCalibrator:
             fitted_on=fitted_on,
             weights_id=weights_id,
             population_reference_mean=population_reference_mean,
+            genuine_similarity_floor=genuine_similarity_floor,
         )
 
     # -- application ------------------------------------------------------
@@ -191,6 +199,7 @@ class ScoreCalibrator:
                     "fitted_on": self.fitted_on,
                     "weights_id": self.weights_id,
                     "population_reference_mean": self.population_reference_mean,
+                    "genuine_similarity_floor": self.genuine_similarity_floor,
                 },
                 indent=2,
             )
@@ -208,6 +217,7 @@ class ScoreCalibrator:
             fitted_on=payload.get("fitted_on", ""),
             weights_id=payload.get("weights_id", ""),
             population_reference_mean=payload.get("population_reference_mean", 0.0),
+            genuine_similarity_floor=payload.get("genuine_similarity_floor", 0.0),
         )
 
     @classmethod

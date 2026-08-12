@@ -304,6 +304,10 @@ class Verifier:
             # consistency cannot be measured. Without it their score is a bare
             # similarity fed into a curve fitted on margins, and clips to 100.
             population_reference_mean=self.calibrator.population_reference_mean,
+            # Measured on this corpus rather than assumed. The absolute cosine
+            # scale is a property of the trained model, so a constant tuned
+            # elsewhere would either never fire or reject everything.
+            similarity_floor=self.calibrator.genuine_similarity_floor,
         )
 
         if trace:

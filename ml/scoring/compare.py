@@ -131,6 +131,7 @@ def compare_to_references(
     writer_normalise: bool = True,
     reference_mean: float | None = None,
     population_reference_mean: float = 0.0,
+    similarity_floor: float | None = None,
     cfg: ScoringConfig = SCORING,
 ) -> ComparisonScore:
     """Score one query embedding against a customer's reference embeddings.
@@ -147,6 +148,11 @@ def compare_to_references(
         population_reference_mean: the corpus-wide median specimen agreement,
             used when a customer has only one specimen on file and their own
             consistency therefore cannot be measured.
+        similarity_floor: the similarity below which no genuine comparison was
+            observed on validation. Measured per corpus, because the absolute
+            cosine scale is a property of the trained model — a constant tuned
+            on one corpus says nothing about another. Falls back to
+            ``cfg.absolute_similarity_floor`` when not supplied.
 
     Returns cosine similarities in [-1, 1]; the combined ``raw`` is shifted by
     the baseline, so it can go slightly negative for a query less consistent
@@ -209,7 +215,12 @@ def compare_to_references(
     # similarity on a different scale entirely, and shifting it would corrupt
     # the plain-similarity mode the benchmark uses for comparison.
     if source != "none":
-        raw = min(raw, combined - cfg.absolute_similarity_floor)
+        floor = (
+            similarity_floor
+            if similarity_floor is not None and similarity_floor > 0.0
+            else cfg.absolute_similarity_floor
+        )
+        raw = min(raw, combined - floor)
 
     return ComparisonScore(
         raw=raw,

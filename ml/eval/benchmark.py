@@ -192,7 +192,14 @@ def build_comparisons(
     if population_mean is None:
         population_mean = float(np.median(measurable)) if measurable else 0.0
 
-    def score(query_index: int, writer: str) -> float:
+    genuine_similarities: list[float] = []
+
+    def score(query_index: int, writer: str, *, is_genuine: bool = False) -> float:
+        plain = compare_to_references(
+            embeddings[query_index], references[writer], writer_normalise=False
+        )
+        if is_genuine:
+            genuine_similarities.append(plain.raw)
         raw = compare_to_references(
             embeddings[query_index],
             references[writer],
@@ -212,7 +219,7 @@ def build_comparisons(
         script = records[queries[writer][0]].script
 
         for q in queries[writer]:
-            value = score(q, writer)
+            value = score(q, writer, is_genuine=True)
             overall.add("genuine", value, writer)
             per_script[script].add("genuine", value, writer)
 
@@ -233,6 +240,13 @@ def build_comparisons(
     summary = {
         "writers_evaluated": len(eligible),
         "population_reference_mean": round(population_mean, 5),
+        # The similarity below which no genuine comparison was seen. Used as an
+        # absolute backstop at scoring time, derived per corpus because the
+        # cosine scale is a property of the trained model: a constant tuned on
+        # one corpus is meaningless on another and fails silently.
+        "genuine_similarity_floor": round(
+            float(np.percentile(genuine_similarities, 1.0)) if genuine_similarities else 0.0, 5
+        ),
         "references_per_writer": {
             w: int(references[w].shape[0]) for w in list(eligible)[:5]
         },
@@ -507,6 +521,7 @@ def evaluate(args: argparse.Namespace) -> Path:
                 weights_id=model_id,
                 # Carried with the curve because it is part of the same scale.
                 population_reference_mean=val_summary["population_reference_mean"],
+                genuine_similarity_floor=val_summary["genuine_similarity_floor"],
             )
             calibrator.save(ARTIFACT_ROOT / "calibrator.json")
 
