@@ -221,9 +221,21 @@ def test_intra_reference_mean_needs_two_specimens():
     assert intra_reference_mean(np.array([[1.0, 0.0]])) == 0.0
 
 
+def _consistent_refs(n: int = 4, dim: int = 32, spread: float = 0.05) -> np.ndarray:
+    """Specimens that resemble each other, as a real customer's do.
+
+    Random Gaussian vectors have near-zero mutual agreement, which now
+    correctly reads as a broken enrolment rather than a normal customer.
+    """
+    rng = np.random.default_rng(21)
+    base = rng.normal(size=dim)
+    base /= np.linalg.norm(base)
+    return np.vstack([base + spread * rng.normal(size=dim) for _ in range(n)])
+
+
 def test_writer_normalisation_subtracts_specimen_agreement():
     rng = np.random.default_rng(3)
-    refs = rng.normal(size=(4, 32))
+    refs = _consistent_refs()
     query = rng.normal(size=32)
 
     plain = compare_to_references(query, refs, writer_normalise=False)
@@ -270,7 +282,7 @@ def test_single_specimen_falls_back_rather_than_subtracting_zero():
 
 def test_precomputed_reference_mean_matches_recomputation():
     rng = np.random.default_rng(11)
-    refs = rng.normal(size=(5, 16))
+    refs = _consistent_refs(n=5, dim=16)
     query = rng.normal(size=16)
 
     cached = compare_to_references(query, refs, reference_mean=intra_reference_mean(refs))
@@ -313,7 +325,7 @@ def test_single_specimen_without_a_population_baseline_is_flagged():
 
 def test_several_specimens_prefer_their_own_baseline():
     rng = np.random.default_rng(4)
-    refs = rng.normal(size=(3, 16))
+    refs = _consistent_refs(n=3, dim=16)
     query = rng.normal(size=16)
 
     score = compare_to_references(query, refs, population_reference_mean=0.95)
@@ -363,4 +375,90 @@ def test_population_baseline_survives_a_round_trip(tmp_path):
     calibrator.save(tmp_path / "cal.json")
     assert ScoreCalibrator.load(tmp_path / "cal.json").population_reference_mean == pytest.approx(
         0.9575
+    )
+
+
+# --------------------------------------------------------------------------
+# Guards on the relative score
+#
+# A signature matching the stored specimen 6.8% scored 88/100. The customer's
+# two specimens did not resemble each other, so their agreement was near zero,
+# so the bar the query had to clear was near zero too. Writer normalisation is
+# a relative judgement and on its own has no floor.
+# --------------------------------------------------------------------------
+
+
+def _orthogonal_refs(dim: int = 64) -> np.ndarray:
+    """Two specimens that look nothing like each other. A broken enrolment."""
+    a, b = np.zeros(dim), np.zeros(dim)
+    a[0], b[1] = 1.0, 1.0
+    return np.vstack([a, b])
+
+
+def _query(dim: int = 64, index: int = 7) -> np.ndarray:
+    v = np.zeros(dim)
+    v[index] = 1.0
+    return v
+
+
+def test_disagreeing_specimens_do_not_lower_the_bar():
+    """The reported failure, reduced to its mechanism."""
+    score = compare_to_references(
+        _query(), _orthogonal_refs(), population_reference_mean=0.95
+    )
+
+    assert score.specimens_disagree
+    assert score.baseline_source == "population", "a broken enrolment must not set the bar"
+    # A query matching nothing must be far below the baseline, not level with it.
+    assert score.raw < -0.5
+
+
+def test_disagreeing_specimens_are_reported_not_silently_corrected():
+    """An operator can fix a bad enrolment, but only if told about it."""
+    score = compare_to_references(
+        _query(), _orthogonal_refs(), population_reference_mean=0.95
+    )
+    assert score.to_dict()["specimens_disagree"] is True
+
+
+def test_absolute_floor_catches_a_nonsense_match():
+    """Even with a plausible baseline, 7% similarity is not a match."""
+    refs = np.vstack([_query(index=0), _query(index=0)])  # perfectly consistent
+    # A baseline low enough that the relative margin alone would look fine.
+    score = compare_to_references(_query(index=3), refs, reference_mean=0.05)
+    assert score.raw < 0, "an orthogonal query cleared the bar"
+
+
+def test_guards_only_ever_lower_a_score():
+    """The safety property that makes them safe to add.
+
+    Neither guard may raise a score, so neither can create a false accept.
+    """
+    rng = np.random.default_rng(19)
+    dim = 48
+    base = rng.normal(size=dim)
+    base /= np.linalg.norm(base)
+
+    for spread in (0.02, 0.2, 0.8):
+        refs = np.vstack([base + spread * rng.normal(size=dim) for _ in range(3)])
+        for _ in range(20):
+            query = base + rng.normal(size=dim) * rng.uniform(0.01, 1.5)
+            guarded = compare_to_references(query, refs, population_reference_mean=0.95)
+            plain = compare_to_references(query, refs, writer_normalise=False)
+            own = intra_reference_mean(refs)
+            unguarded_margin = plain.raw - own
+            assert guarded.raw <= max(unguarded_margin, plain.raw) + 1e-9
+
+
+def test_a_consistent_customer_is_unaffected_by_the_guards():
+    """Real specimen sets sit far above both floors, so nothing changes."""
+    refs = _consistent_refs(n=3, dim=32, spread=0.02)
+    query = refs[0].copy()
+
+    score = compare_to_references(query, refs, population_reference_mean=0.95)
+
+    assert score.baseline_source == "own"
+    assert not score.specimens_disagree
+    assert score.raw == pytest.approx(
+        0.5 * score.max_similarity + 0.5 * score.mean_similarity - score.intra_reference_mean
     )

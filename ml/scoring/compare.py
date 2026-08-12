@@ -38,6 +38,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from ml.config import SCORING, ScoringConfig
+
 __all__ = [
     "ComparisonScore",
     "compare_to_references",
@@ -74,6 +76,9 @@ class ComparisonScore:
     #   "none"       - no baseline available; `raw` is a bare similarity and is
     #                  NOT on the scale the calibrator was fitted for
     baseline_source: str = "none"
+    # The stored specimens do not resemble each other. A broken enrolment, not
+    # a customer who is easy to match.
+    specimens_disagree: bool = False
 
     @property
     def is_single_reference(self) -> bool:
@@ -95,6 +100,7 @@ class ComparisonScore:
             "intra_reference_mean": round(self.intra_reference_mean, 5),
             "writer_normalised": self.is_writer_normalised,
             "baseline_source": self.baseline_source,
+            "specimens_disagree": self.specimens_disagree,
         }
 
 
@@ -125,6 +131,7 @@ def compare_to_references(
     writer_normalise: bool = True,
     reference_mean: float | None = None,
     population_reference_mean: float = 0.0,
+    cfg: ScoringConfig = SCORING,
 ) -> ComparisonScore:
     """Score one query embedding against a customer's reference embeddings.
 
@@ -166,21 +173,43 @@ def compare_to_references(
     max_sim = float(similarities.max())
     mean_sim = float(similarities.mean())
 
-    raw = max_weight * max_sim + (1.0 - max_weight) * mean_sim
+    combined = max_weight * max_sim + (1.0 - max_weight) * mean_sim
+    raw = combined
 
     mu_ref = 0.0
     source = "none"
+    specimens_disagree = False
     if writer_normalise:
         # Decided by how many specimens there are, not by the sign of the
         # value. A customer whose two specimens barely resemble each other has
         # an agreement near zero — or below it — and that is a real measurement
         # about a real customer, not a missing one.
+        own = None
         if refs.shape[0] >= 2:
-            mu_ref = reference_mean if reference_mean is not None else intra_reference_mean(refs)
-            source = "own"
+            own = reference_mean if reference_mean is not None else intra_reference_mean(refs)
+
+        if own is not None and own >= cfg.min_specimen_agreement:
+            mu_ref, source = own, "own"
         elif population_reference_mean:
+            # Either one specimen, or specimens that do not resemble each
+            # other. The second case is a broken enrolment, and using its
+            # near-zero agreement as the bar is what let a 6.8% match score 88.
+            specimens_disagree = own is not None
             mu_ref, source = population_reference_mean, "population"
+        elif own is not None:
+            mu_ref, source = own, "own"
+
         raw -= mu_ref
+
+    # An absolute backstop, applied last and only ever downward. Whatever the
+    # baseline says, a similarity this far below any plausible signature match
+    # is not a match.
+    #
+    # Only when a baseline was actually subtracted. Without one `raw` is a bare
+    # similarity on a different scale entirely, and shifting it would corrupt
+    # the plain-similarity mode the benchmark uses for comparison.
+    if source != "none":
+        raw = min(raw, combined - cfg.absolute_similarity_floor)
 
     return ComparisonScore(
         raw=raw,
@@ -191,4 +220,5 @@ def compare_to_references(
         n_references=int(refs.shape[0]),
         intra_reference_mean=mu_ref,
         baseline_source=source,
+        specimens_disagree=specimens_disagree,
     )

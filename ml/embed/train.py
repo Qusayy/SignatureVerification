@@ -140,6 +140,7 @@ def train(args: argparse.Namespace) -> Path:
         train_ds,
         writers_per_batch=args.writers_per_batch,
         samples_per_writer=args.samples_per_writer,
+        forgery_ratio=args.forgery_ratio,
         batches_per_epoch=args.batches_per_epoch,
         seed=args.seed,
     )
@@ -153,8 +154,13 @@ def train(args: argparse.Namespace) -> Path:
     from dataclasses import replace
 
     model_cfg = MODEL
+    overrides = {}
     if args.forgery_weight is not None:
-        model_cfg = replace(MODEL, forgery_loss_weight=args.forgery_weight)
+        overrides["forgery_loss_weight"] = args.forgery_weight
+    if args.pair_weight is not None:
+        overrides["pair_loss_weight"] = args.pair_weight
+    if overrides:
+        model_cfg = replace(MODEL, **overrides)
 
     model = build_model(args.arch, model_cfg, pretrained=args.pretrained, track=args.track).to(device)
     criterion = CombinedLoss(model.embedding_dim, train_ds.n_writers, model_cfg).to(device)
@@ -272,6 +278,8 @@ def _save(
             "samples_per_writer": args.samples_per_writer,
             "batches_per_epoch": args.batches_per_epoch,
             "forgery_weight": model_cfg.forgery_loss_weight,
+            "pair_weight": model_cfg.pair_loss_weight,
+            "forgery_ratio": args.forgery_ratio,
             "augment": not args.no_augment,
         },
     )
@@ -342,6 +350,28 @@ def main() -> None:
             f"(default {MODEL.forgery_loss_weight}). Raise it when skilled-forgery EER is the "
             "failing metric; lower it when the embedding space is not separating writers at all. "
             "Re-tune on real data — the value that works on synthetic signatures will not transfer."
+        ),
+    )
+    parser.add_argument(
+        "--pair-weight",
+        type=float,
+        default=None,
+        help=(
+            "Weight on the global-threshold pair term (default "
+            f"{MODEL.pair_loss_weight}). Trains one decision threshold to work "
+            "for every writer, which is what single-specimen customers depend "
+            "on: with one signature on file there is no per-customer baseline "
+            "to normalise against. 0 disables it."
+        ),
+    )
+    parser.add_argument(
+        "--forgery-ratio",
+        type=float,
+        default=0.5,
+        help=(
+            "Fraction of each writer's slots in a batch filled with forgeries. "
+            "Lower it to get more genuine-genuine positive pairs, which is what "
+            "the pair term learns the threshold from."
         ),
     )
     parser.add_argument("--out", type=Path, default=None)

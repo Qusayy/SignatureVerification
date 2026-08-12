@@ -103,6 +103,17 @@ class ModelConfig:
     # Weight of the forgery-contrastive term relative to writer identity.
     forgery_loss_weight: float = 0.95
     triplet_margin: float = 0.35
+    # Weight on the global-threshold pair term. See
+    # :class:`ml.embed.losses.GlobalThresholdPairLoss`: the triplet objective
+    # only orders distances *within* a writer, so two writers can each be
+    # separable at different absolute cosines. With several specimens on file
+    # that is recoverable at scoring time from the customer's own specimen
+    # agreement; with a single specimen it is not, and every writer is judged
+    # on one shared scale. This term asks the model to provide that scale.
+    #
+    # Added on top of the identity/forgery combination rather than folded into
+    # it, so an existing recipe keeps its balance. Set to 0.0 to disable.
+    pair_loss_weight: float = 0.3
 
 
 MODEL = ModelConfig()
@@ -148,6 +159,27 @@ class ScoringConfig:
     # high-precision auto-accept threshold should re-take this decision, and
     # neither recipe supports one today.
     writer_normalise: bool = True
+
+    # --- Guards on the relative score -----------------------------------
+    #
+    # Writer normalisation is a *relative* judgement, and on its own it has no
+    # floor: a customer whose stored specimens do not resemble each other has a
+    # baseline near zero, so any query at all clears it. A signature matching
+    # the specimen 6.8% scored 88/100 that way. Both guards below can only ever
+    # lower a score, never raise one, so neither can introduce a false accept.
+
+    # No relative margin rescues an absolute similarity this low. A genuine
+    # signature sits at 0.90-0.99 and even a good forgery at 0.79-0.95, so this
+    # never binds on real comparisons — it exists to stop nonsense, not to
+    # tune the operating point.
+    absolute_similarity_floor: float = 0.60
+
+    # Specimen agreement below this means the stored specimens do not look like
+    # each other. That is a broken enrolment — wrong customer, mis-cropped
+    # scan, two different people — and it must not be read as "this customer is
+    # easy to match". The population baseline is used instead, and the response
+    # says so.
+    min_specimen_agreement: float = 0.50
 
     # Cohort z/t/s-normalisation against a background population.
     #

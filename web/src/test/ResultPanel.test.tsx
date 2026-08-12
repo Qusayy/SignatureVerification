@@ -26,6 +26,7 @@ function result(overrides: Partial<VerificationResult> = {}): VerificationResult
       intra_reference_mean: 0.72,
       writer_normalised: true,
       baseline_source: 'own' as const,
+      specimens_disagree: false,
     },
     detection: {
       bbox: { x: 10, y: 20, width: 300, height: 90 },

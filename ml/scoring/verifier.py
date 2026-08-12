@@ -338,7 +338,12 @@ class Verifier:
             # consistency. Where it did not — a single specimen on file — it is
             # not, and that case is warned about below.
             normalized = comparison.raw
-        if self.cfg.writer_normalise and comparison.baseline_source != "own":
+        if comparison.specimens_disagree:
+            # Louder than the population-baseline note, because this is a data
+            # problem an operator can act on rather than a limitation of the
+            # score: the specimens on file do not look like the same hand.
+            warnings.append("stored_specimens_disagree")
+        elif self.cfg.writer_normalise and comparison.baseline_source != "own":
             warnings.append(
                 "score_uses_population_baseline"
                 if comparison.baseline_source == "population"

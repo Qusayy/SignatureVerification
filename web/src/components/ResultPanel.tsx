@@ -15,6 +15,8 @@ const WARNING_TEXT: Record<string, string> = {
     'Only one specimen signature is on file for this customer, so confidence is lower than usual.',
   uncalibrated_score_placeholder:
     'This model has not been calibrated. The number shown is indicative only, not a confidence.',
+  stored_specimens_disagree:
+    'The specimens on file for this customer do not resemble each other. Check the enrolment — they may be from different people, or one may be mis-cropped. Until that is resolved this score cannot be relied on.',
   score_uses_population_baseline:
     'Only one specimen is on file, so this customer’s own consistency cannot be measured. ' +
     'The score is judged against a typical customer instead, which makes it less reliable ' +

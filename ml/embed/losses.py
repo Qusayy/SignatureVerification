@@ -23,13 +23,20 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from ml.config import MODEL, ModelConfig
 
-__all__ = ["ArcFaceHead", "ForgeryTripletLoss", "CombinedLoss"]
+__all__ = [
+    "ArcFaceHead",
+    "ForgeryTripletLoss",
+    "CombinedLoss",
+    "GlobalThresholdPairLoss",
+    "batch_hard_triplet",
+]
 
 
 class ArcFaceHead(nn.Module):
@@ -139,6 +146,90 @@ def batch_hard_triplet(
     return losses.mean()
 
 
+class GlobalThresholdPairLoss(nn.Module):
+    """Force one decision threshold to work for every writer.
+
+    **Why this exists, and why it matters most with a single specimen.**
+
+    The triplet term optimises a *relative* ordering: for each writer, genuine
+    samples should sit closer than forgeries. It says nothing about where the
+    boundary falls in absolute terms, so two writers can each be perfectly
+    separable and yet need different thresholds — one at cosine 0.90, another
+    at 0.75.
+
+    With several specimens on file that is recoverable at scoring time: the
+    customer's own specimen agreement supplies a per-customer baseline, which
+    is worth ~15 EER points (see :mod:`ml.scoring.compare`). With **one**
+    specimen there is no such baseline to compute, the score falls back to a
+    population median, and every writer is judged on the same absolute scale —
+    the exact thing nothing in the objective was asking the model to provide.
+
+    This term asks for it directly. Every pair in the batch is classified as
+    same-writer-genuine or not, through a single learnable scale and bias
+    shared by all writers::
+
+        p(same) = sigmoid(scale * (cosine - bias))
+
+    Because ``scale`` and ``bias`` are global, the only way to drive the loss
+    down is to make cosine values mean the same thing across writers. That is
+    precisely the property single-specimen verification depends on.
+
+    After training ``bias`` is a useful artefact in itself: it is the model's
+    own estimate of the natural global threshold.
+    """
+
+    def __init__(self, scale: float = 10.0, bias: float = 0.5):
+        super().__init__()
+        # Parameterised in log space so the scale stays positive under SGD.
+        self.log_scale = nn.Parameter(torch.tensor(float(np.log(scale))))
+        self.bias = nn.Parameter(torch.tensor(float(bias)))
+
+    @property
+    def threshold(self) -> float:
+        """The learned global decision boundary, as a cosine."""
+        return float(self.bias.detach())
+
+    def forward(
+        self,
+        embeddings: torch.Tensor,
+        writer_labels: torch.Tensor,
+        is_genuine: torch.Tensor,
+    ) -> torch.Tensor:
+        emb = F.normalize(embeddings)
+        cosine = emb @ emb.t()
+
+        same_writer = writer_labels[:, None] == writer_labels[None, :]
+        genuine_row = is_genuine[:, None]
+        genuine_col = is_genuine[None, :]
+        eye = torch.eye(len(emb), dtype=torch.bool, device=emb.device)
+
+        # Positive: two genuine samples from one writer — what a real
+        # verification looks like when the customer is who they say.
+        positive = same_writer & genuine_row & genuine_col & ~eye
+        # Negative: this writer's forgeries (the hard case) and other writers'
+        # signatures (which keeps the absolute scale honest; without them the
+        # model can satisfy the loss by inflating every cosine).
+        negative = (same_writer & (genuine_row ^ genuine_col)) | ~same_writer
+
+        pairs = positive | negative
+        # Upper triangle only: the matrix is symmetric, so counting both halves
+        # would double-weight every pair for no benefit.
+        pairs = pairs & torch.triu(torch.ones_like(pairs), diagonal=1).bool()
+        if not pairs.any():
+            return embeddings.sum() * 0.0
+
+        logits = self.log_scale.exp() * (cosine[pairs] - self.bias)
+        targets = positive[pairs].float()
+
+        # Negatives vastly outnumber positives in a P x K batch, so weight the
+        # two classes evenly. Otherwise the cheapest way down is to call
+        # everything a non-match.
+        n_pos = targets.sum().clamp(min=1.0)
+        n_neg = (targets.numel() - targets.sum()).clamp(min=1.0)
+        weights = torch.where(targets > 0, n_neg / n_pos, torch.ones_like(targets))
+        return F.binary_cross_entropy_with_logits(logits, targets, weight=weights)
+
+
 class CombinedLoss(nn.Module):
     """ArcFace identity loss plus the forgery-aware triplet term.
 
@@ -154,6 +245,7 @@ class CombinedLoss(nn.Module):
             embedding_dim, n_writers, scale=cfg.arcface_scale, margin=cfg.arcface_margin
         )
         self.identity_loss = nn.CrossEntropyLoss()
+        self.pair_loss = GlobalThresholdPairLoss()
 
     def forward(
         self,
@@ -176,8 +268,19 @@ class CombinedLoss(nn.Module):
 
         w = self.cfg.forgery_loss_weight
         total = (1.0 - w) * identity + w * forgery
-        return total, {
-            "loss": float(total.detach()),
+
+        # Added rather than blended into the convex combination above, so the
+        # existing identity/forgery balance is untouched and this run stays
+        # comparable with earlier ones.
+        parts = {
             "identity": float(identity.detach()),
             "forgery": float(forgery.detach()),
         }
+        if self.cfg.pair_loss_weight > 0.0:
+            pair = self.pair_loss(embeddings, writer_labels, genuine)
+            total = total + self.cfg.pair_loss_weight * pair
+            parts["pair"] = float(pair.detach())
+            parts["threshold"] = self.pair_loss.threshold
+
+        parts["loss"] = float(total.detach())
+        return total, parts

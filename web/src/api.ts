@@ -36,6 +36,8 @@ export interface Comparison {
    * median stood in — a weaker basis, and it must be shown as such.
    */
   baseline_source: 'own' | 'population' | 'none'
+  /** The stored specimens do not resemble each other: a broken enrolment. */
+  specimens_disagree: boolean
 }
 
 export interface Detection {

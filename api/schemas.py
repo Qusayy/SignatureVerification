@@ -97,6 +97,7 @@ class ComparisonOut(BaseModel):
     # must not present a population baseline as though it measured this
     # customer.
     baseline_source: str = "none"
+    specimens_disagree: bool = False
 
 
 class PipelineStageOut(BaseModel):

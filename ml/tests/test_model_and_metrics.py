@@ -161,7 +161,9 @@ def test_combined_loss_runs_and_reports_components():
     loss.backward()
 
     assert torch.isfinite(loss)
-    assert set(parts) == {"loss", "identity", "forgery"}
+    # `pair` and `threshold` appear because the global-threshold term is on by
+    # default; see ml/embed/losses.py::GlobalThresholdPairLoss.
+    assert set(parts) == {"loss", "identity", "forgery", "pair", "threshold"}
     assert embeddings.grad is not None
 
 

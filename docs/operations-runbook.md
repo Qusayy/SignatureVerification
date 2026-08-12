@@ -52,6 +52,54 @@ python -m ml.embed.provenance artifacts/signet_track_b.pt --gate
 Non-zero exit means the weight was trained on non-commercial data or from a
 licence-encumbered initialisation. Do not deploy it. See `docs/licensing.md`.
 
+### Training for single-specimen customers
+
+Most deployments hold one signature per customer, and that case is 7.5 EER
+points worse than several (27.58% vs 20.10% on the sealed set). Part of the gap
+is unavoidable — one sample is a noisy view of how someone signs. Part is not.
+
+**What is avoidable.** The triplet objective only orders distances *within* a
+writer, so two writers can each be perfectly separable at different absolute
+cosines — one at 0.90, another at 0.75. With several specimens, scoring
+recovers from that using the customer's own specimen agreement (worth ~15 EER
+points). With one specimen there is no such baseline and every writer is judged
+on one shared scale, which nothing in the objective was asking for.
+
+`GlobalThresholdPairLoss` asks for it: every pair in the batch is classified
+same-or-not through a single learnable scale and bias, so the only way down is
+to make cosines mean the same thing across writers. On by default at weight
+0.3.
+
+**Run it as an A/B, because it is untested at scale.** Same seed, same budget:
+
+```bash
+python -m ml.embed.train --pair-weight 0 --out artifacts/nopair.pt   ...
+python -m ml.embed.train --pair-weight 0.3 --out artifacts/pair.pt   ...
+
+python -m ml.eval.benchmark --checkpoint artifacts/nopair.pt --split test
+python -m ml.eval.benchmark --checkpoint artifacts/pair.pt   --split test
+```
+
+Compare the **single-reference** rows, not the headline — that is the case it
+targets. Read the confidence intervals: below ~3 EER points apart the two are
+not distinguishable, and `--pair-weight 0` is the simpler model.
+
+Two knobs if it helps but not enough: raise `--samples-per-writer` (each writer
+currently contributes one genuine-genuine pair per batch, which is the minimum
+the term can learn from), and lower `--forgery-ratio` below 0.5 to trade
+forgery slots for more positive pairs.
+
+Watch `threshold` in the training log. It is the model's own estimate of the
+global decision boundary and should settle in the cosine range the data
+actually occupies; if it runs to an extreme, the weight is too high.
+
+**Measured and rejected:** augmenting a single specimen into a pseudo-reference
+set at enrolment. It moved EER 27.62% -> 25.71% on 70 writers, with confidence
+intervals overlapping almost entirely and AUC flat (0.8065 -> 0.8048).
+Augmented views agree with each other at 0.984 against 0.951 for real repeats,
+so they measure scanner noise rather than how the person varies. Not worth the
+complexity on that evidence; revisit if a better augmentation model exists.
+
 ### Retraining checklist
 
 Order matters, because `ml.eval.benchmark` always writes `artifacts/cohort.npz`

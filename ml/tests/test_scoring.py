@@ -31,7 +31,7 @@ def _cohort(n: int = 120, seed: int = 0) -> CohortNormalizer:
 
 def test_identical_signature_scores_one():
     query = _unit(np.arange(DIM))
-    score = compare_to_references(query, query.reshape(1, -1))
+    score = compare_to_references(query, query.reshape(1, -1), writer_normalise=False)
     assert score.raw == pytest.approx(1.0)
     assert score.is_single_reference
 
@@ -48,7 +48,9 @@ def test_multi_reference_uses_both_nearest_and_mean():
     query = _unit([1.0] + [0.0] * (DIM - 1))
     close = query
     far = _unit([0.0, 1.0] + [0.0] * (DIM - 2))
-    score = compare_to_references(query, np.vstack([close, far]))
+    # writer_normalise=False: this asserts how the references are pooled,
+    # not how the result is expressed relative to a baseline.
+    score = compare_to_references(query, np.vstack([close, far]), writer_normalise=False)
 
     assert score.max_similarity == pytest.approx(1.0)
     assert score.mean_similarity == pytest.approx(0.5, abs=1e-6)
